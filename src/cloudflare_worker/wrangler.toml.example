@@ -1,0 +1,11 @@
+name = "multytrack-relay"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+YANDEX_FUNCTION_URL = "https://functions.yandexcloud.net/<FUNCTION_ID>"
+
+# Add the following as Cloudflare Worker secrets, never here:
+# TELEGRAM_BOT_TOKEN
+# TELEGRAM_WEBHOOK_SECRET
+# RELAY_SECRET

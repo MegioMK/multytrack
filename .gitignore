@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.clasp.json
+credentials.json
+service-account*.json
+*.pem
+*.key
+node_modules/
+__pycache__/
+*.py[cod]
+.wrangler/
+wrangler.toml
