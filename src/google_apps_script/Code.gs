@@ -28,7 +28,7 @@ var CLOSED_STATUSES_ = ['done', 'cancelled', 'skipped'];
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Таск-трекер')
-    .addItem('Обновить всё сейчас', 'runTaskTrackerAutomation')
+    .addItem('Создать готовые задачи сейчас', 'runTaskTrackerAutomationNow')
     .addItem('Как это работает', 'showTaskTrackerMenuHelp')
     .addSeparator()
     .addItem('Восстановить автоматизацию', 'installTaskTrackerAutomation')
@@ -38,7 +38,7 @@ function onOpen() {
 function showTaskTrackerMenuHelp() {
   SpreadsheetApp.getUi().alert(
     'Таск-трекер',
-    '«Обновить всё сейчас» вручную запускает обычную автоматику: разбирает готовые Входящие, создает задачи и рутины, обновляет подзадачи, статусы и План дня.\n\n' +
+    '«Создать готовые задачи сейчас» сразу разбирает заполненные Входящие, не дожидаясь двух минут. Автоматическая обработка по таймеру по-прежнему ждет две минуты после последней правки, чтобы не создавать недописанные черновики.\n\n' +
     '«Восстановить автоматизацию» используйте только если что-то перестало обновляться само. Команда пересоздаст технические триггеры и сразу выполнит обновление. Данные в таблице не удаляются.',
     SpreadsheetApp.getUi().ButtonSet.OK
   );
@@ -119,7 +119,7 @@ function onIncomingTaskDraftEdit(event) {
 function runTaskTrackerAutomation() {
   ensureTaskTrackerSchema_();
   reconcileIncomingTaskLinks_();
-  promoteReadyIncoming_();
+  promoteReadyIncoming_(false);
   ensureStarterSubtasks_();
   syncSubtaskTaskTitles_();
   syncSubtaskPlanningStatuses_();
@@ -130,6 +130,19 @@ function runTaskTrackerAutomation() {
   sendEveningPlanIfDue_();
   sendDailyIncomingReminderIfDue_();
   sendShoppingListIfDue_();
+}
+
+// Ручной запуск осознанно обходит задержку черновика: пользователь уже закончил ввод.
+function runTaskTrackerAutomationNow() {
+  ensureTaskTrackerSchema_();
+  reconcileIncomingTaskLinks_();
+  promoteReadyIncoming_(true);
+  ensureStarterSubtasks_();
+  syncSubtaskTaskTitles_();
+  syncSubtaskPlanningStatuses_();
+  refreshSubtaskChecks();
+  syncTaskStatusesFromSubtasks_();
+  syncRoutineOccurrences_(false);
 }
 
 // "Задача создана" допустима только пока все сохраненные ID существуют в листе задач.
@@ -183,7 +196,7 @@ function reconcileIncomingTaskLinks_() {
   });
 }
 
-function promoteReadyIncoming_() {
+function promoteReadyIncoming_(forceDraftPromotion) {
   var sheet = getTrackerSpreadsheet_().getSheetByName(TASK_TRACKER_CONFIG_.incomingSheet);
   var headers = getHeaders_(sheet);
   if (!hasDataRows_(sheet)) {
@@ -209,7 +222,7 @@ function promoteReadyIncoming_() {
          String(item['Созданные покупки ID'] || '').trim()) &&
         String(item['Формулировка задачи'] || '').trim() &&
         !String(item['Созданные задачи ID'] || '').trim() &&
-        isDraftReadyForPromotion_(item)) {
+        (forceDraftPromotion || isDraftReadyForPromotion_(item))) {
       promoted += promoteIncomingRow_(rowNumber) ? 1 : 0;
     }
   });
