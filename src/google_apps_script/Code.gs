@@ -552,6 +552,12 @@ function findDuplicateTask_(tasks, title) {
 function taskTextsOverlap_(left, right) {
   var first = normalizeTaskText_(left);
   var second = normalizeTaskText_(right);
+  var firstNumbers = (first.match(/\d+/g) || []).sort();
+  var secondNumbers = (second.match(/\d+/g) || []).sort();
+  // A shared topic does not make distinct dated outcomes duplicates.
+  if (firstNumbers.join('|') !== secondNumbers.join('|')) {
+    return false;
+  }
   if (first.length < 10 || second.length < 10) {
     return false;
   }
