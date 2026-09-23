@@ -91,6 +91,7 @@ function onIncomingTaskDraftEdit(event) {
       syncSubtaskPlanningStatuses_(event.range.getRow(), event.range.getNumRows());
     }
     if (rangeIncludesColumn_(event.range, columnNumber_(subtaskHeaders, 'Статус'))) {
+      touchSubtaskUpdated_(event.range);
       completeRoutineFromSubtask_(event.range.getRow());
       syncTaskStatusesFromSubtasks_();
     }
@@ -825,11 +826,12 @@ function buildEveningPlanTexts_(spreadsheet, now, timezone) {
     spreadsheet,
     now,
     timezone,
-    'Добрый вечер! 🌙\nСегодня в работе были задачи ниже. Не забудь закрыть выполненное или перенести незавершенное.'
+    'Добрый вечер! 🌙\nСегодня в работе были задачи ниже. Не забудь закрыть выполненное или перенести незавершенное.',
+    false
   );
 }
 
-function buildPlanSummaryTexts_(spreadsheet, now, timezone, greeting) {
+function buildPlanSummaryTexts_(spreadsheet, now, timezone, greeting, includeLoadSummary) {
   var sheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.subtasksSheet);
   var headers = getHeaders_(sheet);
   var todayKey = Utilities.formatDate(now, timezone, 'yyyy-MM-dd');
@@ -864,11 +866,16 @@ function buildPlanSummaryTexts_(spreadsheet, now, timezone, greeting) {
   var overdueBlock = overdueYesterday.length ?
     formatDailyPlanBlock_('⚠️ Просрочено вчера', overdueYesterday) :
     '✨ <b>Просрочено вчера</b>\nНичего нет. Отличный темп!';
-  var dayLimitHours = Number(spreadsheet.getSheetByName('План дня').getRange('B2').getValue()) || 0;
-  var loadSummary = buildPlanLoadSummary_(routines, today, dayLimitHours * 60);
+  var summary = '';
+  if (includeLoadSummary !== false) {
+    var dayLimitHours = Number(spreadsheet.getSheetByName('План дня').getRange('B2').getValue()) || 0;
+    summary = buildPlanLoadSummary_(routines, today, dayLimitHours * 60);
+  } else {
+    summary = buildCompletedTodaySummary_(spreadsheet, headers, todayKey, timezone);
+  }
   var compactPlan = [
     greeting,
-    loadSummary,
+    summary,
     formatDailyPlanBlock_('🌿 Рутины', routines),
     formatDailyPlanBlock_('🎯 Сегодня', today),
     overdueBlock
@@ -878,7 +885,7 @@ function buildPlanSummaryTexts_(spreadsheet, now, timezone, greeting) {
     return [compactPlan];
   }
 
-  var intro = greeting + '\n\n' + loadSummary;
+  var intro = greeting + '\n\n' + summary;
   var blocks = splitDailyPlanBlock_('🌿 Рутины', routines, Math.max(1000, 3600 - intro.length - 2))
     .concat(splitDailyPlanBlock_('🎯 Сегодня', today));
   blocks = blocks.concat(overdueYesterday.length ?
@@ -886,6 +893,64 @@ function buildPlanSummaryTexts_(spreadsheet, now, timezone, greeting) {
     [overdueBlock]);
   blocks[0] = intro + '\n\n' + blocks[0];
   return blocks;
+}
+
+function buildCompletedTodaySummary_(spreadsheet, subtaskHeaders, todayKey, timezone) {
+  var subtasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.subtasksSheet);
+  var tasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.tasksSheet);
+  var completedSubtasks = 0;
+  var completedRoutines = 0;
+  var completedTasks = 0;
+
+  if (hasDataRows_(subtasksSheet)) {
+    subtasksSheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(subtasksSheet), subtaskHeaders.length).getValues().forEach(function(row) {
+      var subtask = rowToObject_(subtaskHeaders, row);
+      if (String(subtask.Статус || '').toLowerCase() === 'done' &&
+          dateKeyInTimezone_(subtask.Обновлено, timezone) === todayKey) {
+        if (isRoutineSubtask_(subtask)) {
+          completedRoutines += 1;
+        } else {
+          completedSubtasks += 1;
+        }
+      }
+    });
+  }
+  if (hasDataRows_(tasksSheet)) {
+    var taskHeaders = getHeaders_(tasksSheet);
+    tasksSheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(tasksSheet), taskHeaders.length).getValues().forEach(function(row) {
+      var task = rowToObject_(taskHeaders, row);
+      if (String(task.Статус || '').toLowerCase() === 'done' &&
+          dateKeyInTimezone_(task.Обновлено, timezone) === todayKey) {
+        completedTasks += 1;
+      }
+    });
+  }
+
+  var total = completedSubtasks + completedRoutines;
+  var lines = ['✅ <b>Итоги дня</b>', 'Закрыто дел: ' + total + '.'];
+  if (completedRoutines || completedSubtasks) {
+    lines.push('🌿 Рутин: ' + completedRoutines + '; 🎯 подзадач: ' + completedSubtasks + '.');
+  }
+  if (completedTasks) {
+    lines.push('Полностью завершено задач: ' + completedTasks + '.');
+  }
+  return lines.join('\n');
+}
+
+function touchSubtaskUpdated_(range) {
+  var sheet = range.getSheet();
+  var firstRow = Math.max(range.getRow(), TASK_TRACKER_CONFIG_.dataStartRow);
+  var count = Math.max(0, range.getLastRow() - firstRow + 1);
+  if (!count) {
+    return;
+  }
+  var updatedColumn = columnNumber_(getHeaders_(sheet), 'Обновлено');
+  var now = nowIso_();
+  var values = [];
+  for (var index = 0; index < count; index += 1) {
+    values.push([now]);
+  }
+  sheet.getRange(firstRow, updatedColumn, count, 1).setValues(values);
 }
 
 function buildPlanLoadSummary_(routines, workSubtasks, limitMinutes) {

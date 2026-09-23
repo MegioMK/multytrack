@@ -255,13 +255,16 @@ def handle_command(message: dict[str, Any], text: str) -> str | dict[str, Any]:
             + _incoming_sheet_url() + "\">Входящие</a>.\n\n"
             "/today - актуальные подзадачи на сегодня\n"
             "/hot - просроченные подзадачи\n\n"
-            "Кнопка Done закрывает подзадачу сразу в таблице."
+            "/shopping - активный список покупок\n\n"
+            "Кнопки Done и Куплено сразу обновляют таблицу."
         )
     if command == "/today":
         return build_actionable_subtasks_digest("today")
     if command == "/hot":
         return build_actionable_subtasks_digest("hot")
-    return "Не знаю такую команду. Доступно: /today, /hot, /help."
+    if command == "/shopping":
+        return build_actionable_shopping_digest()
+    return "Не знаю такую команду. Доступно: /today, /hot, /shopping, /help."
 
 
 def capture_incoming(
@@ -539,6 +542,42 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0) -> dict[str, Any]
     return {"text": "\n".join(lines), "reply_markup": {"inline_keyboard": keyboard}}
 
 
+def build_actionable_shopping_digest(page: int = 0) -> dict[str, Any]:
+    closed_statuses = {"done", "cancelled", "skipped"}
+    selected = [
+        item for item in _sheet_rows_with_numbers("Список покупок", "A11:H1000")
+        if item.get("ID") and item.get("Покупка")
+        and item.get("Статус", "").lower() not in closed_statuses
+    ]
+    heading = "<b>🛒 Список покупок</b>"
+    if not selected:
+        return {"text": heading + "\n\nСписок пуст. Всё куплено!"}
+
+    page_count = max(1, (len(selected) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, page_count - 1))
+    start = page * PAGE_SIZE
+    visible = selected[start:start + PAGE_SIZE]
+    lines = [heading, f"Покупки {start + 1}-{start + len(visible)} из {len(selected)}"]
+    keyboard = []
+    for item in visible:
+        title = item["Покупка"]
+        lines.append("• " + escape(title))
+        button_title = title if len(title) <= 28 else title[:25] + "..."
+        keyboard.append([{
+            "text": "Куплено: " + button_title,
+            "callback_data": _purchase_callback_data(item),
+        }])
+    navigation = []
+    if page > 0:
+        navigation.append({"text": "◀️ Назад", "callback_data": f"page:shopping:{page - 1}"})
+    if page + 1 < page_count:
+        count = min(PAGE_SIZE, len(selected) - start - PAGE_SIZE)
+        navigation.append({"text": f"Следующие {count} ▶️", "callback_data": f"page:shopping:{page + 1}"})
+    if navigation:
+        keyboard.append(navigation)
+    return {"text": "\n".join(lines), "reply_markup": {"inline_keyboard": keyboard}}
+
+
 def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
     callback_id = str(callback.get("id") or "")
     message = callback.get("message") or {}
@@ -546,9 +585,14 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
     if sender_id != _configured_chat_id() or not message:
         return _telegram_callback_reply(callback_id, "Недостаточно прав.", show_alert=True)
     _enforce_allowed_chat(message)
-    page_match = re.fullmatch(r"page:(today|hot):(\d+)", str(callback.get("data") or ""))
+    page_match = re.fullmatch(r"page:(today|hot|shopping):(\d+)", str(callback.get("data") or ""))
     if page_match:
-        digest = build_actionable_subtasks_digest(page_match.group(1), int(page_match.group(2)))
+        mode = page_match.group(1)
+        digest = (
+            build_actionable_shopping_digest(int(page_match.group(2)))
+            if mode == "shopping"
+            else build_actionable_subtasks_digest(mode, int(page_match.group(2)))
+        )
         edit_telegram_message(
             str(message["chat"]["id"]),
             int(message["message_id"]),
@@ -556,6 +600,19 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
             digest.get("reply_markup"),
         )
         return _telegram_callback_reply(callback_id, "Показала следующую страницу.")
+    purchase_match = re.fullmatch(r"purchase:(\d+):([0-9a-f]{8})", str(callback.get("data") or ""))
+    if purchase_match:
+        row_number = int(purchase_match.group(1))
+        item = _purchase_by_row_number(row_number)
+        if not item or not hmac.compare_digest(purchase_match.group(2), _purchase_callback_signature(row_number, item["ID"])):
+            return _telegram_callback_reply(callback_id, "Покупка изменилась. Обновите список.", show_alert=True)
+        if item.get("Статус", "").lower() in {"done", "cancelled", "skipped"}:
+            return _telegram_callback_reply(callback_id, "Уже отмечена.")
+        sheets_update_values("Список покупок", f"C{row_number}:C{row_number}", [["done"]])
+        sheets_update_values("Список покупок", f"G{row_number}:G{row_number}", [[_now().isoformat(timespec="seconds")]])
+        title = str(item.get("Покупка") or "Покупка")
+        send_telegram_message(str(message["chat"]["id"]), f"✅ Отметил купленным: <b>{escape(title)}</b>.")
+        return _telegram_callback_reply(callback_id, "Готово, отметил купленным.")
     match = re.fullmatch(r"done:(\d+):([0-9a-f]{8})", str(callback.get("data") or ""))
     if not match:
         return _telegram_callback_reply(callback_id, "Эта кнопка больше не действует.", show_alert=True)
@@ -566,6 +623,7 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
     if item.get("Статус", "").lower() in {"done", "cancelled", "skipped"}:
         return _telegram_callback_reply(callback_id, "Уже закрыта.")
     sheets_update_values("Подзадачи", f"E{row_number}:E{row_number}", [["done"]])
+    sheets_update_values("Подзадачи", f"L{row_number}:L{row_number}", [[_now().isoformat(timespec="seconds")]])
     title = str(item.get("Название") or item.get("Задача") or "Подзадача")
     send_telegram_message(str(message["chat"]["id"]), f"✅ Обновил: <b>{escape(title)}</b>.")
     return _telegram_callback_reply(callback_id, "Готово, обновил.")
@@ -595,6 +653,13 @@ def _subtask_by_row_number(row_number: int) -> dict[str, str] | None:
     return next((row for row in rows if int(row["__row_number"]) == row_number), None)
 
 
+def _purchase_by_row_number(row_number: int) -> dict[str, str] | None:
+    if row_number < 12 or row_number > 1000:
+        return None
+    rows = _sheet_rows_with_numbers("Список покупок", f"A11:H{row_number}")
+    return next((row for row in rows if int(row["__row_number"]) == row_number), None)
+
+
 def _done_callback_data(item: dict[str, str]) -> str:
     row_number = int(item["__row_number"])
     return f"done:{row_number}:{_done_callback_signature(row_number, item['ID'])}"
@@ -602,6 +667,16 @@ def _done_callback_data(item: dict[str, str]) -> str:
 
 def _done_callback_signature(row_number: int, subtask_id: str) -> str:
     payload = f"done:{row_number}:{subtask_id}".encode("utf-8")
+    return hmac.new(_env("RELAY_SECRET").encode("utf-8"), payload, "sha256").hexdigest()[:8]
+
+
+def _purchase_callback_data(item: dict[str, str]) -> str:
+    row_number = int(item["__row_number"])
+    return f"purchase:{row_number}:{_purchase_callback_signature(row_number, item['ID'])}"
+
+
+def _purchase_callback_signature(row_number: int, purchase_id: str) -> str:
+    payload = f"purchase:{row_number}:{purchase_id}".encode("utf-8")
     return hmac.new(_env("RELAY_SECRET").encode("utf-8"), payload, "sha256").hexdigest()[:8]
 
 
@@ -1227,10 +1302,15 @@ def _project_hint(text: str) -> str:
     hints = {
         "карьер": "Карьера",
         "резюме": "Карьера",
-        "бот": "Таск-трекер",
-        "telegram": "Таск-трекер",
-        "тг": "Таск-трекер",
-        "счет": "Финансы / счета",
+        "бот": "Трекер",
+        "трекер": "Трекер",
+        "telegram": "Трекер",
+        "тг": "Трекер",
+        "финанс": "Финансы",
+        "счет": "Финансы",
+        "бюджет": "Финансы",
+        "расход": "Финансы",
+        "доход": "Финансы",
         "клиент": "Клиенты",
     }
     for marker, value in hints.items():
