@@ -14,6 +14,7 @@ var TASK_TRACKER_CONFIG_ = {
   incomingReminderDays: 1,
   morningHour: 8,
   eveningPlanHour: 20,
+  weeklyReflectionHour: 12,
   draftWaitMinutes: 2
 };
 
@@ -31,6 +32,7 @@ function onOpen() {
     .addItem('Создать готовые задачи сейчас', 'runTaskTrackerAutomationNow')
     .addItem('Собрать сводку за сегодня', 'createDailySummaryNow')
     .addItem('Собрать итоги недели', 'createWeeklySummaryNow')
+    .addItem('Позвать на недельную рефлексию', 'sendWeeklyReflectionNow')
     .addItem('Как это работает', 'showTaskTrackerMenuHelp')
     .addSeparator()
     .addItem('Восстановить автоматизацию', 'installTaskTrackerAutomation')
@@ -141,6 +143,7 @@ function runTaskTrackerAutomation() {
   syncRoutineOccurrences_(false);
   createDailySummaryIfDue_();
   createWeeklySummaryIfDue_();
+  sendWeeklyReflectionIfDue_();
   sendDailyPlanIfDue_();
   sendEveningPlanIfDue_();
   sendDailyIncomingReminderIfDue_();
@@ -1144,6 +1147,25 @@ function requestYandexNotifications_(texts) {
   }
 }
 
+function requestYandexWeeklyReflection_(weekStart, cutoffKey) {
+  var properties = PropertiesService.getScriptProperties();
+  var functionUrl = properties.getProperty('YANDEX_FUNCTION_URL');
+  var relaySecret = properties.getProperty('RELAY_SECRET');
+  if (!functionUrl || !relaySecret) {
+    throw new Error('Недельная рефлексия не настроена: отсутствуют Script Properties Yandex Function.');
+  }
+  var response = UrlFetchApp.fetch(functionUrl, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'X-Relay-Secret': relaySecret },
+    payload: JSON.stringify({ mode: 'weekly_reflection_prompt', week_start: weekStart, cutoff: cutoffKey }),
+    muteHttpExceptions: true
+  });
+  if (response.getResponseCode() >= 300) {
+    throw new Error('Yandex Function не смогла начать недельную рефлексию: ' + response.getContentText());
+  }
+}
+
 function getStaleIncoming_() {
   var sheet = getTrackerSpreadsheet_().getSheetByName(TASK_TRACKER_CONFIG_.incomingSheet);
   var headers = getHeaders_(sheet);
@@ -1198,7 +1220,8 @@ function ensureSummarySheets_(spreadsheet) {
   var summaries = spreadsheet.getSheetByName('Сводки');
   var weekly = spreadsheet.getSheetByName('Итоги недели');
   var dailyHeaders = ['ID', 'Дата', 'Тип', 'Период', 'Закрыто подзадач', 'Закрыто рутин', 'Закрыто задач', 'Куплено', 'Закрыто, мин', 'Запланировано, мин', 'Новых входящих', 'Разобрано входящих', 'Просрочено на конец дня', 'По проектам', 'Создано'];
-  var weeklyHeaders = ['ID', 'Неделя', 'Главный итог', 'Зеленое', 'Желтое', 'Красное', 'Что переносим', 'Что меняем', 'Создано', 'Заметки', 'Закрыто подзадач', 'Закрыто рутин', 'Закрыто задач', 'Куплено', 'Закрыто, мин', 'Запланировано, мин', 'Просрочено на конец недели', 'По проектам'];
+  // Новые поля идут после цифр, чтобы не сдвигать уже собранные недельные итоги.
+  var weeklyHeaders = ['ID', 'Неделя', 'Главный итог', 'Зеленое', 'Желтое', 'Красное', 'Что переносим', 'Что меняем', 'Создано', 'Заметки', 'Закрыто подзадач', 'Закрыто рутин', 'Закрыто задач', 'Куплено', 'Закрыто, мин', 'Запланировано, мин', 'Просрочено на конец недели', 'По проектам', 'Энергия и фокус', 'Урок недели', 'Коммуникация', 'Рост', 'Повторить / не повторять', 'Фокус следующей недели', 'Поддержка'];
   [
     { sheet: summaries, headers: dailyHeaders },
     { sheet: weekly, headers: weeklyHeaders }
@@ -1208,7 +1231,8 @@ function ensureSummarySheets_(spreadsheet) {
     item.sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
   });
   // Рефлексию недели пользователь пишет сам; отделяем ее цветом от автоматических полей.
-  weekly.getRange(TASK_TRACKER_CONFIG_.headerRow, 3, 1, 6).setBackground('#fbc965');
+  weekly.getRange(TASK_TRACKER_CONFIG_.headerRow, 3, 1, 8).setBackground('#fbc965');
+  weekly.getRange(TASK_TRACKER_CONFIG_.headerRow, 19, 1, 7).setBackground('#fbc965');
 }
 
 function createDailySummaryIfDue_() {
@@ -1343,20 +1367,21 @@ function createWeeklySummaryIfDue_() {
   var spreadsheet = getTrackerSpreadsheet_();
   var timezone = spreadsheet.getSpreadsheetTimeZone();
   var now = new Date();
-  if (now.getDay() !== 0 || Utilities.formatDate(now, timezone, 'HH:mm') < '23:40') {
+  if (now.getDay() !== 4 || Utilities.formatDate(now, timezone, 'HH:mm') < '12:00') {
     return;
   }
-  createWeeklySummary_(spreadsheet, weekStartKey_(now, timezone), timezone);
+  createWeeklySummary_(spreadsheet, reflectionWeekStartKey_(now, timezone), timezone, reflectionCutoffKey_(now, timezone));
 }
 
 function createWeeklySummaryNow() {
   var spreadsheet = getTrackerSpreadsheet_();
   ensureTaskTrackerSchema_();
   var timezone = spreadsheet.getSpreadsheetTimeZone();
-  createWeeklySummary_(spreadsheet, weekStartKey_(new Date(), timezone), timezone);
+  var now = new Date();
+  createWeeklySummary_(spreadsheet, reflectionWeekStartKey_(now, timezone), timezone, reflectionCutoffKey_(now, timezone));
 }
 
-function createWeeklySummary_(spreadsheet, weekStart, timezone) {
+function createWeeklySummary_(spreadsheet, weekStart, timezone, cutoffKey) {
   var sheet = spreadsheet.getSheetByName('Итоги недели');
   var headers = getHeaders_(sheet);
   var totals = { subtasks: 0, routines: 0, tasks: 0, purchases: 0, closedMinutes: 0, plannedMinutes: 0, overdue: 0, projects: {} };
@@ -1372,12 +1397,10 @@ function createWeeklySummary_(spreadsheet, weekStart, timezone) {
       totals.projects[project] = (totals.projects[project] || 0) + metrics.projects[project];
     });
   }
-  var end = new Date(weekStart + 'T12:00:00');
-  end.setDate(end.getDate() + 6);
-  var period = weekStart + ' — ' + Utilities.formatDate(end, timezone, 'yyyy-MM-dd');
+  var period = weekStart + ' 12:00 — ' + cutoffKey + ' 12:00';
   var rowNumber = findWeeklySummaryRow_(sheet, headers, period);
   var values = {
-    ID: 'week_' + weekStart,
+    ID: 'week_' + cutoffKey,
     Неделя: period,
     'Закрыто подзадач': totals.subtasks,
     'Закрыто рутин': totals.routines,
@@ -1411,6 +1434,52 @@ function weekStartKey_(date, timezone) {
   var day = (start.getDay() + 6) % 7;
   start.setDate(start.getDate() - day);
   return Utilities.formatDate(start, timezone, 'yyyy-MM-dd');
+}
+
+// Рефлексия закрывает цикл в четверг в 12:00. Цифры опираются на семь
+// завершенных дневных снимков с прошлого четверга по среду включительно.
+function reflectionCutoffKey_(now, timezone) {
+  var cutoff = new Date(now.getTime());
+  var daysSinceThursday = (cutoff.getDay() + 3) % 7;
+  var currentTime = Utilities.formatDate(cutoff, timezone, 'HH:mm');
+  if (cutoff.getDay() === 4 && currentTime < '12:00') {
+    daysSinceThursday = 7;
+  }
+  cutoff.setDate(cutoff.getDate() - daysSinceThursday);
+  return Utilities.formatDate(cutoff, timezone, 'yyyy-MM-dd');
+}
+
+function reflectionWeekStartKey_(now, timezone) {
+  var cutoff = reflectionCutoffKey_(now, timezone);
+  var start = new Date(cutoff + 'T12:00:00');
+  start.setDate(start.getDate() - 7);
+  return Utilities.formatDate(start, timezone, 'yyyy-MM-dd');
+}
+
+function sendWeeklyReflectionIfDue_() {
+  var spreadsheet = getTrackerSpreadsheet_();
+  var timezone = spreadsheet.getSpreadsheetTimeZone();
+  var now = new Date();
+  if (now.getDay() !== 4 || Utilities.formatDate(now, timezone, 'HH:mm') < '12:00') {
+    return;
+  }
+  var cutoffKey = reflectionCutoffKey_(now, timezone);
+  var properties = PropertiesService.getScriptProperties();
+  if (properties.getProperty('WEEKLY_REFLECTION_PROMPT_CUTOFF') === cutoffKey) {
+    return;
+  }
+  requestYandexWeeklyReflection_(reflectionWeekStartKey_(now, timezone), cutoffKey);
+  properties.setProperty('WEEKLY_REFLECTION_PROMPT_CUTOFF', cutoffKey);
+}
+
+function sendWeeklyReflectionNow() {
+  var spreadsheet = getTrackerSpreadsheet_();
+  ensureTaskTrackerSchema_();
+  var timezone = spreadsheet.getSpreadsheetTimeZone();
+  var now = new Date();
+  var cutoffKey = reflectionCutoffKey_(now, timezone);
+  createWeeklySummary_(spreadsheet, reflectionWeekStartKey_(now, timezone), timezone, cutoffKey);
+  requestYandexWeeklyReflection_(reflectionWeekStartKey_(now, timezone), cutoffKey);
 }
 
 function ensureReferencesSheet_(spreadsheet, incomingSheet, tasksSheet, routinesSheet) {

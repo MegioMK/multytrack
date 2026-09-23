@@ -162,6 +162,24 @@ DEFAULT_SETTINGS = [
     ["wip_большие_камни", "2", "Ориентир по числу крупных активных проектов"],
     ["wip_маленькие_камни", "3", "Ориентир по числу небольших активных проектов"],
     ["горячая_задача_дней_до_дедлайна", "2", "Порог для подсветки близких дедлайнов"],
+    ["рефлексия_недели_состояние", "", "Служебное состояние диалога недельной рефлексии"],
+]
+
+
+WEEKLY_REFLECTION_QUESTIONS = [
+    ("Главный итог", "Что на этой неделе было самым значимым результатом? Где ты реально продвинулась, а не просто была занята?"),
+    ("Зеленое", "Что в работе и системе сработало хорошо и что стоит продолжать?"),
+    ("Желтое", "Что получилось частично или требует внимания на следующем цикле?"),
+    ("Энергия и фокус", "Что дало тебе больше всего энергии? Что, наоборот, съедало энергию и фокус?"),
+    ("Красное", "Какие задачи стоило сделать раньше или иначе? Что ты откладывала и почему на самом деле?"),
+    ("Урок недели", "Какие одно-два решения были особенно удачными? Какой урок можно вынести и из какого кейса?"),
+    ("Что переносим", "Какие один-три результата ты осознанно переносишь в следующий цикл?"),
+    ("Коммуникация", "Где тебе помогла коммуникация с людьми? Где не хватило ясности в договоренностях или ожиданиях?"),
+    ("Что меняем", "Что в системе работы стоит упростить, убрать или изменить?"),
+    ("Рост", "Какие навыки ты прокачала? Какой маленький, но конкретный шаг роста выбираешь на следующий цикл?"),
+    ("Повторить / не повторять", "Что ты точно хочешь повторить на следующей неделе и что точно не хочешь повторять?"),
+    ("Фокус следующей недели", "Какую одну задачу или фокус выбираешь главным на следующую неделю?"),
+    ("Поддержка", "Какую поддержку ты хочешь от коллеги в ближайшие семь дней?"),
 ]
 
 
@@ -190,6 +208,11 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 for text in texts:
                     send_telegram_message(_configured_chat_id(), text)
                 return _json_response({"ok": True, "mode": "send_notifications", "sent": len(texts)})
+            if control.get("mode") == "weekly_reflection_prompt":
+                return _json_response(start_weekly_reflection_prompt(
+                    str(control.get("week_start") or ""),
+                    str(control.get("cutoff") or ""),
+                ))
 
         if event.get("mode") == "send_test":
             chat_id = str(event.get("chat_id") or _configured_chat_id())
@@ -243,6 +266,9 @@ def process_message(message: dict[str, Any]) -> str | dict[str, Any] | None:
     text = (message.get("text") or message.get("caption") or "").strip()
     if text.startswith("/"):
         return handle_command(message, text)
+    reflection_handled, reflection_reply = process_weekly_reflection_reply(message, text)
+    if reflection_handled:
+        return reflection_reply
     return capture_incoming(message, force_task=False)
 
 
@@ -585,6 +611,9 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
     if sender_id != _configured_chat_id() or not message:
         return _telegram_callback_reply(callback_id, "Недостаточно прав.", show_alert=True)
     _enforce_allowed_chat(message)
+    reflection_action = str(callback.get("data") or "")
+    if reflection_action in {"reflection:start", "reflection:later", "reflection:skip", "reflection:finish"}:
+        return handle_weekly_reflection_callback(callback_id, str(message["chat"]["id"]), reflection_action)
     page_match = re.fullmatch(r"page:(today|hot|shopping):(\d+)", str(callback.get("data") or ""))
     if page_match:
         mode = page_match.group(1)
@@ -629,6 +658,129 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
     title = str(item.get("Название") or item.get("Задача") or "Подзадача")
     send_telegram_message(str(message["chat"]["id"]), f"✅ Обновил: <b>{escape(title)}</b>.")
     return _telegram_callback_reply(callback_id, "Готово, обновил.")
+
+
+def start_weekly_reflection_prompt(week_start: str, cutoff: str) -> dict[str, Any]:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", week_start) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cutoff):
+        raise ConfigError("Для недельной рефлексии нужны даты начала и среза.")
+    state = _weekly_reflection_state()
+    if state.get("cutoff") == cutoff and state.get("status") == "completed":
+        return {"ok": True, "mode": "weekly_reflection_prompt", "skipped": "completed"}
+    row = _weekly_reflection_row(cutoff)
+    if not row:
+        raise ConfigError("Не найдена строка итогов недели для рефлексии.")
+    if state.get("cutoff") == cutoff and state.get("status") in {"waiting", "active"}:
+        return {"ok": True, "mode": "weekly_reflection_prompt", "skipped": "already_started"}
+    state = {"week_start": week_start, "cutoff": cutoff, "status": "waiting", "step": 0, "question_message_id": 0}
+    _set_weekly_reflection_state(state)
+    send_telegram_message(
+        _configured_chat_id(),
+        "<b>Недельная рефлексия</b> 🌿\n"
+        f"Цикл: {week_start} 12:00 — {cutoff} 12:00.\n"
+        "Соберем главное за 5–10 минут? Ответы попадут в Итоги недели.",
+        {"inline_keyboard": [[
+            {"text": "Начать", "callback_data": "reflection:start"},
+            {"text": "Не сейчас", "callback_data": "reflection:later"},
+        ]]},
+    )
+    return {"ok": True, "mode": "weekly_reflection_prompt"}
+
+
+def handle_weekly_reflection_callback(callback_id: str, chat_id: str, action: str) -> dict[str, Any]:
+    state = _weekly_reflection_state()
+    if not state or state.get("status") == "completed":
+        return _telegram_callback_reply(callback_id, "Эта рефлексия уже завершена.", show_alert=True)
+    if action == "reflection:later":
+        state["status"] = "waiting"
+        _set_weekly_reflection_state(state)
+        return _telegram_callback_reply(callback_id, "Хорошо. Кнопка «Начать» останется здесь.")
+    if action == "reflection:start":
+        _send_next_weekly_reflection_question(chat_id, state)
+        return _telegram_callback_reply(callback_id, "Начинаем.")
+    if action == "reflection:skip":
+        _advance_weekly_reflection(chat_id, state, "")
+        return _telegram_callback_reply(callback_id, "Пропустила вопрос.")
+    state["status"] = "completed"
+    _set_weekly_reflection_state(state)
+    send_telegram_message(chat_id, "Рефлексию сохранила. Ее всегда можно дополнить в <b>Итоги недели</b>.")
+    return _telegram_callback_reply(callback_id, "Рефлексия завершена.")
+
+
+def process_weekly_reflection_reply(message: dict[str, Any], text: str) -> tuple[bool, str | None]:
+    state = _weekly_reflection_state()
+    if state.get("status") != "active":
+        return False, None
+    reply_to = message.get("reply_to_message") or {}
+    if int(reply_to.get("message_id") or 0) != int(state.get("question_message_id") or 0):
+        # Только явный ответ на вопрос бота относится к рефлексии. Остальной
+        # поток остается Входящими, даже пока диалог еще не завершен.
+        return False, None
+    if not text:
+        return True, "Ответ не вижу. Напиши его текстом ответом на мой вопрос или нажми «Пропустить вопрос»."
+    _advance_weekly_reflection(str(message["chat"]["id"]), state, text)
+    return True, None
+
+
+def _advance_weekly_reflection(chat_id: str, state: dict[str, Any], answer: str) -> None:
+    step = int(state.get("step") or 0)
+    if step >= len(WEEKLY_REFLECTION_QUESTIONS):
+        state["status"] = "completed"
+        _set_weekly_reflection_state(state)
+        return
+    header, _ = WEEKLY_REFLECTION_QUESTIONS[step]
+    row = _weekly_reflection_row(str(state.get("cutoff") or ""))
+    if not row:
+        raise ConfigError("Строка итогов недели больше не найдена.")
+    if answer:
+        sheets_update_value_by_header("Итоги недели", int(row["__row_number"]), header, answer)
+    state["step"] = step + 1
+    _send_next_weekly_reflection_question(chat_id, state)
+
+
+def _send_next_weekly_reflection_question(chat_id: str, state: dict[str, Any]) -> None:
+    step = int(state.get("step") or 0)
+    if step >= len(WEEKLY_REFLECTION_QUESTIONS):
+        state["status"] = "completed"
+        state["question_message_id"] = 0
+        _set_weekly_reflection_state(state)
+        send_telegram_message(chat_id, "✨ Рефлексия сохранена в <b>Итоги недели</b>. Спасибо, что остановилась и посмотрела на неделю целиком.")
+        return
+    _, question = WEEKLY_REFLECTION_QUESTIONS[step]
+    response = send_telegram_message(
+        chat_id,
+        f"<b>{step + 1}/{len(WEEKLY_REFLECTION_QUESTIONS)}</b>\n{escape(question)}\n\n"
+        "Ответь именно на это сообщение: тогда текст точно пойдет в рефлексию, а не во Входящие.",
+        {"force_reply": True, "input_field_placeholder": "Напиши ответ"},
+    )
+    message_id = int(((response.get("result") or {}).get("message_id")) or 0)
+    if not message_id:
+        raise ConfigError("Telegram не вернул ID вопроса рефлексии.")
+    state["status"] = "active"
+    state["question_message_id"] = message_id
+    _set_weekly_reflection_state(state)
+    send_telegram_message(chat_id, "Можно пропустить вопрос или завершить рефлексию в любой момент.", {
+        "inline_keyboard": [[
+            {"text": "Пропустить вопрос", "callback_data": "reflection:skip"},
+            {"text": "Завершить", "callback_data": "reflection:finish"},
+        ]]
+    })
+
+
+def _weekly_reflection_row(cutoff: str) -> dict[str, str] | None:
+    return next((row for row in _sheet_rows_with_numbers("Итоги недели", "A11:Z1000") if row.get("ID") == f"week_{cutoff}"), None)
+
+
+def _weekly_reflection_state() -> dict[str, Any]:
+    raw = _setting_value("рефлексия_недели_состояние", "")
+    try:
+        value = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _set_weekly_reflection_state(state: dict[str, Any]) -> None:
+    _set_setting("рефлексия_недели_состояние", json.dumps(state, ensure_ascii=False, separators=(",", ":")))
 
 
 def _sheet_rows_with_numbers(sheet_name: str, range_a1: str) -> list[dict[str, str]]:
@@ -950,15 +1102,14 @@ def _ensure_default_settings() -> None:
         sheets_append_values("Настройки", missing)
 
 
-def send_telegram_message(chat_id: str, text: str, reply_markup: dict[str, Any] | None = None) -> None:
+def send_telegram_message(chat_id: str, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
     outbound_relay_url = os.getenv("TELEGRAM_OUTBOUND_RELAY_URL", "")
     if outbound_relay_url:
-        _send_via_outbound_relay(outbound_relay_url, chat_id, text, reply_markup)
-        return
+        return _send_via_outbound_relay(outbound_relay_url, chat_id, text, reply_markup)
     payload: dict[str, Any] = {"chat_id": chat_id, "text": text[:3900], "parse_mode": "HTML"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    telegram_api_post("sendMessage", payload)
+    return telegram_api_post("sendMessage", payload)
 
 
 def edit_telegram_message(
@@ -1001,7 +1152,7 @@ def _send_via_outbound_relay(
     chat_id: str,
     text: str,
     reply_markup: dict[str, Any] | None = None,
-) -> None:
+) -> dict[str, Any]:
     try:
         response = requests.post(
             relay_url,
@@ -1022,6 +1173,7 @@ def _send_via_outbound_relay(
         data = {}
     if response.status_code >= 400 or data.get("ok") is False:
         raise ConfigError("Исходящий Telegram relay отклонил сообщение")
+    return data
 
 
 def _send_edit_via_outbound_relay(
@@ -1157,7 +1309,7 @@ def _parse_control_request(event: dict[str, Any]) -> dict[str, Any] | None:
         payload = json.loads(body)
     except (TypeError, ValueError):
         return None
-    if isinstance(payload, dict) and payload.get("mode") in {"send_notification", "send_notifications"}:
+    if isinstance(payload, dict) and payload.get("mode") in {"send_notification", "send_notifications", "weekly_reflection_prompt"}:
         return payload
     return None
 
@@ -1203,7 +1355,7 @@ def _split_command(text: str) -> tuple[str, str]:
 
 
 def _rows_as_dicts(sheet_name: str) -> list[dict[str, str]]:
-    values = sheets_get_values(sheet_name, "A1:Z500")
+    values = sheets_get_values(sheet_name, "A11:Z500")
     if len(values) < 2:
         return []
     headers = values[0]
@@ -1251,9 +1403,9 @@ def _sheet_id_by_title(title: str) -> int:
 
 
 def _set_setting(key: str, value: str) -> None:
-    values = sheets_get_values("Настройки", "A1:D500")
+    values = sheets_get_values("Настройки", "A11:D500")
     now = _now().isoformat(timespec="seconds")
-    for index, row in enumerate(values[1:], start=2):
+    for index, row in enumerate(values[1:], start=12):
         if row and row[0] == key:
             sheets_update_values("Настройки", f"B{index}:D{index}", [[value, _setting_description(key), now]])
             return
