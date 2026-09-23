@@ -29,6 +29,8 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Таск-трекер')
     .addItem('Создать готовые задачи сейчас', 'runTaskTrackerAutomationNow')
+    .addItem('Собрать сводку за сегодня', 'createDailySummaryNow')
+    .addItem('Собрать итоги недели', 'createWeeklySummaryNow')
     .addItem('Как это работает', 'showTaskTrackerMenuHelp')
     .addSeparator()
     .addItem('Восстановить автоматизацию', 'installTaskTrackerAutomation')
@@ -91,9 +93,19 @@ function onIncomingTaskDraftEdit(event) {
       syncSubtaskPlanningStatuses_(event.range.getRow(), event.range.getNumRows());
     }
     if (rangeIncludesColumn_(event.range, columnNumber_(subtaskHeaders, 'Статус'))) {
+      updateClosedDates_(sheet, subtaskHeaders, event.range, 'Статус', 'Дата закрытия');
       touchSubtaskUpdated_(event.range);
       completeRoutineFromSubtask_(event.range.getRow());
       syncTaskStatusesFromSubtasks_();
+    }
+    return;
+  }
+
+  if (sheet.getName() === TASK_TRACKER_CONFIG_.shoppingSheet) {
+    var shoppingHeaders = getHeaders_(sheet);
+    if (rangeIncludesColumn_(event.range, columnNumber_(shoppingHeaders, 'Статус'))) {
+      updateClosedDates_(sheet, shoppingHeaders, event.range, 'Статус', 'Дата закрытия');
+      touchRowsUpdated_(sheet, shoppingHeaders, event.range);
     }
     return;
   }
@@ -127,6 +139,8 @@ function runTaskTrackerAutomation() {
   refreshSubtaskChecks();
   syncTaskStatusesFromSubtasks_();
   syncRoutineOccurrences_(false);
+  createDailySummaryIfDue_();
+  createWeeklySummaryIfDue_();
   sendDailyPlanIfDue_();
   sendEveningPlanIfDue_();
   sendDailyIncomingReminderIfDue_();
@@ -555,7 +569,8 @@ function taskTextsOverlap_(left, right) {
   var second = normalizeTaskText_(right);
   var firstNumbers = (first.match(/\d+/g) || []).sort();
   var secondNumbers = (second.match(/\d+/g) || []).sort();
-  // A shared topic does not make distinct dated outcomes duplicates.
+  // Одинаковая тема не означает один результат: «9 дней» и «40 дней» - разные дела.
+  // Числа и даты считаем частью смысла формулировки, а не шумом при поиске дублей.
   if (firstNumbers.join('|') !== secondNumbers.join('|')) {
     return false;
   }
@@ -659,7 +674,8 @@ function syncTaskStatusesFromSubtasks_() {
     }
     setObjectFields_(tasksSheet, taskHeaders, index + TASK_TRACKER_CONFIG_.dataStartRow, {
       Статус: nextStatus,
-      Обновлено: nowIso_()
+      Обновлено: nowIso_(),
+      'Дата закрытия': nextStatus === 'done' ? nowIso_() : ''
     });
     updated += 1;
   });
@@ -938,19 +954,38 @@ function buildCompletedTodaySummary_(spreadsheet, subtaskHeaders, todayKey, time
 }
 
 function touchSubtaskUpdated_(range) {
-  var sheet = range.getSheet();
+  touchRowsUpdated_(range.getSheet(), getHeaders_(range.getSheet()), range);
+}
+
+function touchRowsUpdated_(sheet, headers, range) {
   var firstRow = Math.max(range.getRow(), TASK_TRACKER_CONFIG_.dataStartRow);
   var count = Math.max(0, range.getLastRow() - firstRow + 1);
   if (!count) {
     return;
   }
-  var updatedColumn = columnNumber_(getHeaders_(sheet), 'Обновлено');
+  var updatedColumn = columnNumber_(headers, 'Обновлено');
   var now = nowIso_();
   var values = [];
   for (var index = 0; index < count; index += 1) {
     values.push([now]);
   }
   sheet.getRange(firstRow, updatedColumn, count, 1).setValues(values);
+}
+
+function updateClosedDates_(sheet, headers, range, statusHeader, closedDateHeader) {
+  var firstRow = Math.max(range.getRow(), TASK_TRACKER_CONFIG_.dataStartRow);
+  var count = Math.max(0, range.getLastRow() - firstRow + 1);
+  if (!count) {
+    return;
+  }
+  var statuses = sheet.getRange(firstRow, columnNumber_(headers, statusHeader), count, 1).getValues();
+  var closedDateColumn = columnNumber_(headers, closedDateHeader);
+  var existingDates = sheet.getRange(firstRow, closedDateColumn, count, 1).getValues();
+  var now = nowIso_();
+  var values = statuses.map(function(row, index) {
+    return [String(row[0] || '').toLowerCase() === 'done' ? (existingDates[index][0] || now) : ''];
+  });
+  sheet.getRange(firstRow, closedDateColumn, count, 1).setValues(values);
 }
 
 function buildPlanLoadSummary_(routines, workSubtasks, limitMinutes) {
@@ -1141,6 +1176,10 @@ function ensureTaskTrackerSchema_() {
   var routinesSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.routinesSheet);
   ensureRoutineColumns_(routinesSheet);
   var tasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.tasksSheet);
+  ensureColumn_(tasksSheet, 'Дата закрытия');
+  ensureColumn_(subtasksSheet, 'Дата закрытия');
+  ensureColumn_(shoppingSheet, 'Дата закрытия');
+  ensureSummarySheets_(spreadsheet);
   migrateStatusModel_(spreadsheet, incomingSheet, tasksSheet, subtasksSheet, routinesSheet, shoppingSheet);
   var referencesSheet = ensureReferencesSheet_(spreadsheet, incomingSheet, tasksSheet, routinesSheet);
   applyReferenceValidation_(incomingSheet, 'Статус разбора', referencesSheet, 'Статусы работы');
@@ -1153,6 +1192,225 @@ function ensureTaskTrackerSchema_() {
   applyReferenceValidation_(routinesSheet, 'Статус', referencesSheet, 'Статусы рутин');
   applyReferenceValidation_(routinesSheet, 'Повторение', referencesSheet, 'Повторение');
   applyReferenceValidation_(routinesSheet, 'Категория', referencesSheet, 'Категории рутин');
+}
+
+function ensureSummarySheets_(spreadsheet) {
+  var summaries = spreadsheet.getSheetByName('Сводки');
+  var weekly = spreadsheet.getSheetByName('Итоги недели');
+  var dailyHeaders = ['ID', 'Дата', 'Тип', 'Период', 'Закрыто подзадач', 'Закрыто рутин', 'Закрыто задач', 'Куплено', 'Закрыто, мин', 'Запланировано, мин', 'Новых входящих', 'Разобрано входящих', 'Просрочено на конец дня', 'По проектам', 'Создано'];
+  var weeklyHeaders = ['ID', 'Неделя', 'Главный итог', 'Зеленое', 'Желтое', 'Красное', 'Что переносим', 'Что меняем', 'Создано', 'Заметки', 'Закрыто подзадач', 'Закрыто рутин', 'Закрыто задач', 'Куплено', 'Закрыто, мин', 'Запланировано, мин', 'Просрочено на конец недели', 'По проектам'];
+  [
+    { sheet: summaries, headers: dailyHeaders },
+    { sheet: weekly, headers: weeklyHeaders }
+  ].forEach(function(item) {
+    item.sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, item.headers.length).setValues([item.headers]);
+    item.sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, item.headers.length).setFontWeight('bold').setBackground('#e6e6e6');
+    item.sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
+  });
+  // Рефлексию недели пользователь пишет сам; отделяем ее цветом от автоматических полей.
+  weekly.getRange(TASK_TRACKER_CONFIG_.headerRow, 3, 1, 6).setBackground('#fbc965');
+}
+
+function createDailySummaryIfDue_() {
+  var spreadsheet = getTrackerSpreadsheet_();
+  var timezone = spreadsheet.getSpreadsheetTimeZone();
+  var now = new Date();
+  var time = Utilities.formatDate(now, timezone, 'HH:mm');
+  if (time < '23:30') {
+    return;
+  }
+  createDailySummary_(spreadsheet, Utilities.formatDate(now, timezone, 'yyyy-MM-dd'), timezone);
+}
+
+function createDailySummaryNow() {
+  var spreadsheet = getTrackerSpreadsheet_();
+  ensureTaskTrackerSchema_();
+  var timezone = spreadsheet.getSpreadsheetTimeZone();
+  createDailySummary_(spreadsheet, Utilities.formatDate(new Date(), timezone, 'yyyy-MM-dd'), timezone);
+}
+
+function createDailySummary_(spreadsheet, dateKey, timezone) {
+  var sheet = spreadsheet.getSheetByName('Сводки');
+  var headers = getHeaders_(sheet);
+  var metrics = buildSummaryMetrics_(spreadsheet, dateKey, timezone);
+  var rowNumber = findSummaryRow_(sheet, headers, 'день', dateKey);
+  var values = {
+    ID: 'summary_day_' + dateKey,
+    Дата: dateKey,
+    Тип: 'день',
+    Период: dateKey,
+    'Закрыто подзадач': metrics.subtasks,
+    'Закрыто рутин': metrics.routines,
+    'Закрыто задач': metrics.tasks,
+    Куплено: metrics.purchases,
+    'Закрыто, мин': metrics.closedMinutes,
+    'Запланировано, мин': metrics.plannedMinutes,
+    'Новых входящих': metrics.incoming,
+    'Разобрано входящих': metrics.processedIncoming,
+    'Просрочено на конец дня': metrics.overdue,
+    'По проектам': formatProjectMetrics_(metrics.projects),
+    Создано: nowIso_()
+  };
+  if (rowNumber) {
+    setObjectFields_(sheet, headers, rowNumber, values);
+  } else {
+    sheet.getRange(nextDataRow_(sheet), 1, 1, headers.length).setValues([objectToRow_(headers, values)]);
+  }
+}
+
+function buildSummaryMetrics_(spreadsheet, dateKey, timezone) {
+  var result = { subtasks: 0, routines: 0, tasks: 0, purchases: 0, closedMinutes: 0, plannedMinutes: 0, incoming: 0, processedIncoming: 0, overdue: 0, projects: {} };
+  var subtasks = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.subtasksSheet);
+  var subtaskHeaders = getHeaders_(subtasks);
+  if (hasDataRows_(subtasks)) {
+    subtasks.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(subtasks), subtaskHeaders.length).getValues().forEach(function(row) {
+      var item = rowToObject_(subtaskHeaders, row);
+      var status = String(item.Статус || '').toLowerCase();
+      var plannedDate = dateKeyInTimezone_(item.Дата, timezone);
+      if (plannedDate === dateKey) {
+        result.plannedMinutes += estimateMinutes_(item['Оценка, мин']);
+      }
+      if (!isClosed_(status) && plannedDate && plannedDate < dateKey) {
+        result.overdue += 1;
+      }
+      if (status !== 'done' || dateKeyInTimezone_(item['Дата закрытия'], timezone) !== dateKey) {
+        return;
+      }
+      var minutes = estimateMinutes_(item['Оценка, мин']);
+      result.closedMinutes += minutes;
+      if (isRoutineSubtask_(item)) {
+        result.routines += 1;
+      } else {
+        result.subtasks += 1;
+        var project = String(item['Проект / область'] || '').trim() || 'Без проекта';
+        result.projects[project] = (result.projects[project] || 0) + minutes;
+      }
+    });
+  }
+  var tasks = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.tasksSheet);
+  var taskHeaders = getHeaders_(tasks);
+  if (hasDataRows_(tasks)) {
+    tasks.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(tasks), taskHeaders.length).getValues().forEach(function(row) {
+      var item = rowToObject_(taskHeaders, row);
+      if (String(item.Статус || '').toLowerCase() === 'done' && dateKeyInTimezone_(item['Дата закрытия'], timezone) === dateKey) {
+        result.tasks += 1;
+      }
+    });
+  }
+  var purchases = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.shoppingSheet);
+  var purchaseHeaders = getHeaders_(purchases);
+  if (hasDataRows_(purchases)) {
+    purchases.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(purchases), purchaseHeaders.length).getValues().forEach(function(row) {
+      var item = rowToObject_(purchaseHeaders, row);
+      if (String(item.Статус || '').toLowerCase() === 'done' && dateKeyInTimezone_(item['Дата закрытия'], timezone) === dateKey) {
+        result.purchases += 1;
+      }
+    });
+  }
+  var incoming = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.incomingSheet);
+  var incomingHeaders = getHeaders_(incoming);
+  if (hasDataRows_(incoming)) {
+    incoming.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(incoming), incomingHeaders.length).getValues().forEach(function(row) {
+      var item = rowToObject_(incomingHeaders, row);
+      if (dateKeyInTimezone_(item['Дата захвата'], timezone) === dateKey) {
+        result.incoming += 1;
+        if (String(item['Статус разбора'] || '').toLowerCase() === 'done') {
+          result.processedIncoming += 1;
+        }
+      }
+    });
+  }
+  return result;
+}
+
+function findSummaryRow_(sheet, headers, type, period) {
+  if (!hasDataRows_(sheet)) {
+    return 0;
+  }
+  return sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(sheet), headers.length).getValues().reduce(function(found, row, index) {
+    var item = rowToObject_(headers, row);
+    return found || (String(item.Тип || '') === type && String(item.Период || '') === period ? index + TASK_TRACKER_CONFIG_.dataStartRow : 0);
+  }, 0);
+}
+
+function formatProjectMetrics_(projects) {
+  return Object.keys(projects).sort(function(left, right) { return projects[right] - projects[left]; }).map(function(project) {
+    return project + ' — ' + formatMinutes_(projects[project]);
+  }).join('; ');
+}
+
+function createWeeklySummaryIfDue_() {
+  var spreadsheet = getTrackerSpreadsheet_();
+  var timezone = spreadsheet.getSpreadsheetTimeZone();
+  var now = new Date();
+  if (now.getDay() !== 0 || Utilities.formatDate(now, timezone, 'HH:mm') < '23:40') {
+    return;
+  }
+  createWeeklySummary_(spreadsheet, weekStartKey_(now, timezone), timezone);
+}
+
+function createWeeklySummaryNow() {
+  var spreadsheet = getTrackerSpreadsheet_();
+  ensureTaskTrackerSchema_();
+  var timezone = spreadsheet.getSpreadsheetTimeZone();
+  createWeeklySummary_(spreadsheet, weekStartKey_(new Date(), timezone), timezone);
+}
+
+function createWeeklySummary_(spreadsheet, weekStart, timezone) {
+  var sheet = spreadsheet.getSheetByName('Итоги недели');
+  var headers = getHeaders_(sheet);
+  var totals = { subtasks: 0, routines: 0, tasks: 0, purchases: 0, closedMinutes: 0, plannedMinutes: 0, overdue: 0, projects: {} };
+  for (var offset = 0; offset < 7; offset += 1) {
+    var date = new Date(weekStart + 'T12:00:00');
+    date.setDate(date.getDate() + offset);
+    var key = Utilities.formatDate(date, timezone, 'yyyy-MM-dd');
+    var metrics = buildSummaryMetrics_(spreadsheet, key, timezone);
+    ['subtasks', 'routines', 'tasks', 'purchases', 'closedMinutes', 'plannedMinutes', 'overdue'].forEach(function(name) {
+      totals[name] += metrics[name];
+    });
+    Object.keys(metrics.projects).forEach(function(project) {
+      totals.projects[project] = (totals.projects[project] || 0) + metrics.projects[project];
+    });
+  }
+  var end = new Date(weekStart + 'T12:00:00');
+  end.setDate(end.getDate() + 6);
+  var period = weekStart + ' — ' + Utilities.formatDate(end, timezone, 'yyyy-MM-dd');
+  var rowNumber = findWeeklySummaryRow_(sheet, headers, period);
+  var values = {
+    ID: 'week_' + weekStart,
+    Неделя: period,
+    'Закрыто подзадач': totals.subtasks,
+    'Закрыто рутин': totals.routines,
+    'Закрыто задач': totals.tasks,
+    Куплено: totals.purchases,
+    'Закрыто, мин': totals.closedMinutes,
+    'Запланировано, мин': totals.plannedMinutes,
+    'Просрочено на конец недели': totals.overdue,
+    'По проектам': formatProjectMetrics_(totals.projects)
+  };
+  if (rowNumber) {
+    setObjectFields_(sheet, headers, rowNumber, values);
+  } else {
+    values.Создано = nowIso_();
+    sheet.getRange(nextDataRow_(sheet), 1, 1, headers.length).setValues([objectToRow_(headers, values)]);
+  }
+}
+
+function findWeeklySummaryRow_(sheet, headers, period) {
+  if (!hasDataRows_(sheet)) {
+    return 0;
+  }
+  return sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(sheet), headers.length).getValues().reduce(function(found, row, index) {
+    var item = rowToObject_(headers, row);
+    return found || (String(item.Неделя || '') === period ? index + TASK_TRACKER_CONFIG_.dataStartRow : 0);
+  }, 0);
+}
+
+function weekStartKey_(date, timezone) {
+  var start = new Date(date.getTime());
+  var day = (start.getDay() + 6) % 7;
+  start.setDate(start.getDate() - day);
+  return Utilities.formatDate(start, timezone, 'yyyy-MM-dd');
 }
 
 function ensureReferencesSheet_(spreadsheet, incomingSheet, tasksSheet, routinesSheet) {
@@ -1329,7 +1587,7 @@ function ensureShoppingSheet_(spreadsheet) {
     sheet = spreadsheet.insertSheet(TASK_TRACKER_CONFIG_.shoppingSheet);
     sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
   }
-  var headers = ['ID', 'Покупка', 'Статус', 'Источник', 'Ссылка на входящее', 'Создано', 'Обновлено', 'Заметки'];
+  var headers = ['ID', 'Покупка', 'Статус', 'Источник', 'Ссылка на входящее', 'Создано', 'Обновлено', 'Заметки', 'Дата закрытия'];
   sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length).setValues([headers]);
   sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length)
     .setFontWeight('bold')
@@ -2077,5 +2335,7 @@ function nowIso_() {
 }
 
 function trackerUrl_() {
-  return 'https://docs.google.com/spreadsheets/d/' + TASK_TRACKER_CONFIG_.spreadsheetId + '/edit#gid=168051248';
+  var spreadsheet = getTrackerSpreadsheet_();
+  var incoming = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.incomingSheet);
+  return 'https://docs.google.com/spreadsheets/d/' + spreadsheet.getId() + '/edit#gid=' + incoming.getSheetId();
 }

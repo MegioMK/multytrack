@@ -610,6 +610,7 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
             return _telegram_callback_reply(callback_id, "Уже отмечена.")
         sheets_update_values("Список покупок", f"C{row_number}:C{row_number}", [["done"]])
         sheets_update_values("Список покупок", f"G{row_number}:G{row_number}", [[_now().isoformat(timespec="seconds")]])
+        sheets_update_value_by_header("Список покупок", row_number, "Дата закрытия", _now().isoformat(timespec="seconds"))
         title = str(item.get("Покупка") or "Покупка")
         send_telegram_message(str(message["chat"]["id"]), f"✅ Отметил купленным: <b>{escape(title)}</b>.")
         return _telegram_callback_reply(callback_id, "Готово, отметил купленным.")
@@ -624,6 +625,7 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
         return _telegram_callback_reply(callback_id, "Уже закрыта.")
     sheets_update_values("Подзадачи", f"E{row_number}:E{row_number}", [["done"]])
     sheets_update_values("Подзадачи", f"L{row_number}:L{row_number}", [[_now().isoformat(timespec="seconds")]])
+    sheets_update_value_by_header("Подзадачи", row_number, "Дата закрытия", _now().isoformat(timespec="seconds"))
     title = str(item.get("Название") or item.get("Задача") or "Подзадача")
     send_telegram_message(str(message["chat"]["id"]), f"✅ Обновил: <b>{escape(title)}</b>.")
     return _telegram_callback_reply(callback_id, "Готово, обновил.")
@@ -908,6 +910,18 @@ def sheets_update_values(sheet_name: str, range_a1: str, values: list[list[Any]]
         json={"values": values},
     )
     response.raise_for_status()
+
+
+def sheets_update_value_by_header(sheet_name: str, row_number: int, header: str, value: Any) -> None:
+    headers = sheets_get_values(sheet_name, "A11:Z11")
+    if not headers or header not in headers[0]:
+        raise ConfigError(f"Не найден столбец {header} на листе {sheet_name}.")
+    column_index = headers[0].index(header) + 1
+    column = ""
+    while column_index:
+        column_index, remainder = divmod(column_index - 1, 26)
+        column = chr(65 + remainder) + column
+    sheets_update_values(sheet_name, f"{column}{row_number}:{column}{row_number}", [[value]])
 
 
 def sheets_append_values(sheet_name: str, values: list[list[Any]]) -> None:
@@ -1224,7 +1238,16 @@ def _spreadsheet_url() -> str:
 
 
 def _incoming_sheet_url() -> str:
-    return f"{_spreadsheet_url()}#gid=168051248"
+    return f"{_spreadsheet_url()}#gid={_sheet_id_by_title('Входящие')}"
+
+
+def _sheet_id_by_title(title: str) -> int:
+    metadata = sheets_get_metadata()
+    for sheet in metadata.get("sheets", []):
+        properties = sheet.get("properties") or {}
+        if properties.get("title") == title:
+            return int(properties["sheetId"])
+    raise ConfigError(f"Не найден лист {title}.")
 
 
 def _set_setting(key: str, value: str) -> None:
