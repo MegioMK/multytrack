@@ -97,7 +97,7 @@ function onIncomingTaskDraftEdit(event) {
     if (rangeIncludesColumn_(event.range, columnNumber_(subtaskHeaders, 'Статус'))) {
       updateClosedDates_(sheet, subtaskHeaders, event.range, 'Статус', 'Дата закрытия');
       touchSubtaskUpdated_(event.range);
-      completeRoutineFromSubtask_(event.range.getRow());
+      completeRoutineFromSubtask_(event.range.getRow(), true);
       syncTaskStatusesFromSubtasks_();
     }
     return;
@@ -2161,7 +2161,7 @@ function reconcileRoutineIds_(sheet) {
   });
 }
 
-function completeRoutineFromSubtask_(rowNumber) {
+function completeRoutineFromSubtask_(rowNumber, createNextNow) {
   var spreadsheet = getTrackerSpreadsheet_();
   var subtasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.subtasksSheet);
   var subtaskHeaders = getHeaders_(subtasksSheet);
@@ -2176,6 +2176,7 @@ function completeRoutineFromSubtask_(rowNumber) {
   }
   var routineHeaders = getHeaders_(routinesSheet);
   var routines = routinesSheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(routinesSheet), routineHeaders.length).getValues();
+  var completedRoutine = false;
   routines.forEach(function(row, index) {
     var routine = rowToObject_(routineHeaders, row);
     if (String(routine.ID) !== String(subtask['Источник ID']) ||
@@ -2192,7 +2193,11 @@ function completeRoutineFromSubtask_(rowNumber) {
       'Следующая дата': nextDate || '',
       'Текущая подзадача ID': ''
     });
+    completedRoutine = true;
   });
+  if (completedRoutine && createNextNow) {
+    syncRoutineOccurrences_(false);
+  }
 }
 
 function isRoutineActive_(status) {
