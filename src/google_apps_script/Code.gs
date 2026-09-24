@@ -1220,8 +1220,8 @@ function ensureSummarySheets_(spreadsheet) {
   var summaries = spreadsheet.getSheetByName('Сводки');
   var weekly = spreadsheet.getSheetByName('Итоги недели');
   var dailyHeaders = ['ID', 'Дата', 'Тип', 'Период', 'Закрыто подзадач', 'Закрыто рутин', 'Закрыто задач', 'Куплено', 'Закрыто, мин', 'Запланировано, мин', 'Новых входящих', 'Разобрано входящих', 'Просрочено на конец дня', 'По проектам', 'Создано'];
-  // Новые поля идут после цифр, чтобы не сдвигать уже собранные недельные итоги.
-  var weeklyHeaders = ['ID', 'Неделя', 'Главный итог', 'Зеленое', 'Желтое', 'Красное', 'Что переносим', 'Что меняем', 'Создано', 'Заметки', 'Закрыто подзадач', 'Закрыто рутин', 'Закрыто задач', 'Куплено', 'Закрыто, мин', 'Запланировано, мин', 'Просрочено на конец недели', 'По проектам', 'Энергия и фокус', 'Урок недели', 'Коммуникация', 'Рост', 'Повторить / не повторять', 'Фокус следующей недели'];
+  var weeklyHeaders = ['ID', 'Неделя', 'Главный результат', 'Энергия и фокус', 'Что сработало', 'Напряжение и откладывание', 'Урок недели', 'Коммуникация', 'Система работы', 'Рост', 'Следующий цикл', 'Закрыто подзадач', 'Закрыто рутин', 'Закрыто задач', 'Куплено', 'Закрыто, мин', 'Запланировано, мин', 'Просрочено на конец недели', 'По проектам', 'Создано'];
+  migrateWeeklyReflectionLayout_(weekly, weeklyHeaders);
   [
     { sheet: summaries, headers: dailyHeaders },
     { sheet: weekly, headers: weeklyHeaders }
@@ -1231,8 +1231,72 @@ function ensureSummarySheets_(spreadsheet) {
     item.sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
   });
   // Рефлексию недели пользователь пишет сам; отделяем ее цветом от автоматических полей.
-  weekly.getRange(TASK_TRACKER_CONFIG_.headerRow, 3, 1, 8).setBackground('#fbc965');
-  weekly.getRange(TASK_TRACKER_CONFIG_.headerRow, 19, 1, 7).setBackground('#fbc965');
+  weekly.getRange(TASK_TRACKER_CONFIG_.headerRow, 3, 1, 9).setBackground('#fbc965');
+}
+
+function migrateWeeklyReflectionLayout_(sheet, newHeaders) {
+  var oldHeaders = getHeaders_(sheet);
+  var matches = oldHeaders.length === newHeaders.length && oldHeaders.every(function(header, index) {
+    return header === newHeaders[index];
+  });
+  if (matches) {
+    return;
+  }
+  var rows = hasDataRows_(sheet)
+    ? sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(sheet), oldHeaders.length).getValues()
+    : [];
+  var migratedRows = rows.map(function(row) {
+    var item = rowToObject_(oldHeaders, row);
+    var values = {
+      ID: item.ID,
+      Неделя: item.Неделя,
+      'Главный результат': item['Главный результат'] || item['Главный итог'],
+      'Энергия и фокус': item['Энергия и фокус'],
+      'Что сработало': item['Что сработало'] || item['Зеленое'],
+      'Напряжение и откладывание': mergeReflectionValues_([
+        ['Требует внимания', item['Желтое']],
+        ['Откладывалось', item['Красное']]
+      ]),
+      'Урок недели': item['Урок недели'],
+      Коммуникация: item.Коммуникация,
+      'Система работы': item['Система работы'] || item['Что меняем'],
+      Рост: item.Рост,
+      'Следующий цикл': mergeReflectionValues_([
+        ['Переношу', item['Что переносим']],
+        ['Повторить / не повторять', item['Повторить / не повторять']],
+        ['Главный фокус', item['Фокус следующей недели']],
+        ['Поддержка', item.Поддержка]
+      ]),
+      'Закрыто подзадач': item['Закрыто подзадач'],
+      'Закрыто рутин': item['Закрыто рутин'],
+      'Закрыто задач': item['Закрыто задач'],
+      Куплено: item.Куплено,
+      'Закрыто, мин': item['Закрыто, мин'],
+      'Запланировано, мин': item['Запланировано, мин'],
+      'Просрочено на конец недели': item['Просрочено на конец недели'],
+      'По проектам': item['По проектам'],
+      Создано: item.Создано
+    };
+    return objectToRow_(newHeaders, values);
+  });
+  var occupiedColumns = Math.max(oldHeaders.length, newHeaders.length);
+  var rowsToClear = Math.max(sheet.getLastRow() - TASK_TRACKER_CONFIG_.headerRow + 1, 1);
+  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, rowsToClear, occupiedColumns).clearContent();
+  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, newHeaders.length).setValues([newHeaders]);
+  if (migratedRows.length) {
+    sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, migratedRows.length, newHeaders.length).setValues(migratedRows);
+  }
+  if (oldHeaders.length > newHeaders.length) {
+    sheet.deleteColumns(newHeaders.length + 1, oldHeaders.length - newHeaders.length);
+  }
+}
+
+function mergeReflectionValues_(items) {
+  return items.filter(function(item) {
+    return String(item[1] || '').trim();
+  }).map(function(item) {
+    return item[0] + ': ' + item[1];
+  }).join('\n\n');
 }
 
 function createDailySummaryIfDue_() {
