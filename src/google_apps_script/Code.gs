@@ -2006,6 +2006,11 @@ function syncSubtaskPlanningStatuses_(startRow, rowCount) {
 
 // Рутины хранят правило, а в подзадачах живут конкретные выполнения по датам.
 function syncRoutineOccurrences_(refreshCurrentOccurrence) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return;
+  }
+  try {
   var spreadsheet = getTrackerSpreadsheet_();
   var routinesSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.routinesSheet);
   var subtasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.subtasksSheet);
@@ -2039,6 +2044,12 @@ function syncRoutineOccurrences_(refreshCurrentOccurrence) {
     }
     var currentId = String(routine['Текущая подзадача ID'] || '');
     var current = subtasksById[currentId];
+    // Старые экземпляры могли появиться до колонки «Источник ID». Восстанавливаем
+    // связь по уже сохраненному ID текущей подзадачи, чтобы рутина не зависала.
+    if (current && String(current.item['Источник ID'] || '') !== String(routine.ID)) {
+      setObjectFields_(subtasksSheet, subtaskHeaders, current.rowNumber, { 'Источник ID': routine.ID });
+      current.item['Источник ID'] = routine.ID;
+    }
     if (!isRoutineActive_(routine.Статус)) {
       if (current && !isClosed_(current.item.Статус)) {
         setObjectFields_(subtasksSheet, subtaskHeaders, current.rowNumber, { Статус: 'cancelled', Обновлено: nowIso_() });
@@ -2054,7 +2065,16 @@ function syncRoutineOccurrences_(refreshCurrentOccurrence) {
 
     if (current && isClosed_(current.item.Статус)) {
       completeRoutineFromSubtask_(current.rowNumber);
-      return;
+      var closedDate = routineDate_(current.item.Дата);
+      var todayForClosed = startOfDay_(new Date());
+      if (!isDailyRoutine_(routine) || !closedDate || closedDate.getTime() >= todayForClosed.getTime()) {
+        return;
+      }
+      // Даже если старый ежедневный экземпляр закрыли поздно, сегодня остается
+      // самостоятельным днем и должен получить свою подзадачу.
+      routine['Следующая дата'] = nextRoutineDateOnOrAfterToday_(closedDate, routine.Повторение, routine.Интервал) || '';
+      routine['Текущая подзадача ID'] = '';
+      current = null;
     }
 
     if (current && !isClosed_(current.item.Статус)) {
@@ -2121,6 +2141,9 @@ function syncRoutineOccurrences_(refreshCurrentOccurrence) {
   if (additions.length) {
     subtasksSheet.getRange(nextDataRow_(subtasksSheet), 1, additions.length, subtaskHeaders.length).setValues(additions);
   }
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function reconcileRoutineIds_(sheet) {
@@ -2159,7 +2182,11 @@ function completeRoutineFromSubtask_(rowNumber) {
         String(routine['Текущая подзадача ID']) !== String(subtask.ID)) {
       return;
     }
-    var nextDate = nextRoutineDateAfterToday_(subtask.Дата || routine['Следующая дата'], routine.Повторение, routine.Интервал);
+    var completedDate = routineDate_(subtask.Дата || routine['Следующая дата']);
+    var today = startOfDay_(new Date());
+    var nextDate = isDailyRoutine_(routine) && completedDate && completedDate.getTime() < today.getTime()
+      ? nextRoutineDateOnOrAfterToday_(completedDate, routine.Повторение, routine.Интервал)
+      : nextRoutineDateAfterToday_(completedDate || routine['Следующая дата'], routine.Повторение, routine.Интервал);
     setObjectFields_(routinesSheet, routineHeaders, index + TASK_TRACKER_CONFIG_.dataStartRow, {
       'Последнее выполнение': new Date(),
       'Следующая дата': nextDate || '',
