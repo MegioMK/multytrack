@@ -1257,7 +1257,7 @@ function createDailySummary_(spreadsheet, dateKey, timezone) {
   var sheet = spreadsheet.getSheetByName('Сводки');
   var headers = getHeaders_(sheet);
   var metrics = buildSummaryMetrics_(spreadsheet, dateKey, timezone);
-  var rowNumber = findSummaryRow_(sheet, headers, 'день', dateKey);
+  var rowNumber = findSummaryRow_(sheet, headers, 'день', dateKey, timezone);
   var values = {
     ID: 'summary_day_' + dateKey,
     Дата: dateKey,
@@ -1347,13 +1347,14 @@ function buildSummaryMetrics_(spreadsheet, dateKey, timezone) {
   return result;
 }
 
-function findSummaryRow_(sheet, headers, type, period) {
+function findSummaryRow_(sheet, headers, type, period, timezone) {
   if (!hasDataRows_(sheet)) {
     return 0;
   }
   return sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(sheet), headers.length).getValues().reduce(function(found, row, index) {
     var item = rowToObject_(headers, row);
-    return found || (String(item.Тип || '') === type && String(item.Период || '') === period ? index + TASK_TRACKER_CONFIG_.dataStartRow : 0);
+    var savedPeriod = timezone ? dateKeyInTimezone_(item.Период, timezone) : String(item.Период || '');
+    return found || (String(item.Тип || '') === type && savedPeriod === period ? index + TASK_TRACKER_CONFIG_.dataStartRow : 0);
   }, 0);
 }
 
