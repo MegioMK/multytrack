@@ -1881,6 +1881,11 @@ function ensureRoutineColumns_(sheet) {
   ensureColumn_(sheet, 'Интервал');
   ensureColumn_(sheet, 'Оценка, мин');
   ensureColumn_(sheet, 'Текущая подзадача ID');
+  ensureColumn_(sheet, 'Пауза до');
+  var updatedHeaders = getHeaders_(sheet);
+  // Дата паузы — ручное правило, не служебное поле автоматики.
+  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, columnNumber_(updatedHeaders, 'Пауза до'))
+    .setBackground('#fbc965');
 }
 
 function ensureColumn_(sheet, header) {
@@ -2059,6 +2064,31 @@ function syncRoutineOccurrences_(refreshCurrentOccurrence) {
       }
       return;
     }
+    var today = startOfDay_(new Date());
+    var pausedUntil = routineDate_(routine['Пауза до']);
+    if (pausedUntil && today.getTime() < pausedUntil.getTime()) {
+      // Во время паузы не оставляем открытый экземпляр в плане дня.
+      if (current && !isClosed_(current.item.Статус)) {
+        setObjectFields_(subtasksSheet, subtaskHeaders, current.rowNumber, {
+          Статус: 'cancelled',
+          Обновлено: nowIso_()
+        });
+      }
+      if (currentId) {
+        setObjectFields_(routinesSheet, routineHeaders, rowNumber, { 'Текущая подзадача ID': '' });
+      }
+      return;
+    }
+    if (pausedUntil && routine['Следующая дата']) {
+      // После паузы не создаем накопившиеся экземпляры задним числом: продолжаем
+      // расписание с текущего дня.
+      var scheduledDate = routineDate_(routine['Следующая дата']);
+      if (scheduledDate && scheduledDate.getTime() < today.getTime()) {
+        var resumedDate = nextRoutineDateOnOrAfterToday_(scheduledDate, routine.Повторение, routine.Интервал);
+        setObjectFields_(routinesSheet, routineHeaders, rowNumber, { 'Следующая дата': resumedDate || '' });
+        routine['Следующая дата'] = resumedDate || '';
+      }
+    }
     if (!routine['Следующая дата']) {
       return;
     }
@@ -2079,7 +2109,6 @@ function syncRoutineOccurrences_(refreshCurrentOccurrence) {
 
     if (current && !isClosed_(current.item.Статус)) {
       var currentDate = routineDate_(current.item.Дата);
-      var today = startOfDay_(new Date());
       if (isDailyRoutine_(routine) && currentDate && currentDate.getTime() < today.getTime()) {
         // Вчерашний ежедневный шаг не переносим на сегодня: он пропущен,
         // а для нового дня создаем самостоятельный экземпляр.
