@@ -1740,27 +1740,24 @@ function ensureShoppingSheet_(spreadsheet) {
 function ensurePlanDayShoppingSection_(spreadsheet, shoppingSheet, subtasksSheet) {
   var sheet = spreadsheet.getSheetByName('План дня');
   var separator = '\\';
-  var planHeaders = ['Закрыть', 'Подзадача', 'Задача', 'Проект / область', 'Раздел', 'Тип', 'Статус', 'Дата', 'Оценка, мин', 'Дедлайн', 'Заметки', 'ID подзадачи'];
+  var planHeaders = ['Раздел', 'Закрыть', 'Подзадача', 'Задача', 'Проект / область', 'Тип', 'Статус', 'Дата', 'Оценка, мин', 'Дедлайн', 'Заметки', 'ID подзадачи'];
   sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, planHeaders.length).setValues([planHeaders]);
   sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, planHeaders.length).setFontWeight('bold').setBackground('#e6e6e6');
   sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
   sheet.setFrozenColumns(1);
-  [1, 2, 3, 4].forEach(function(column) {
+  [1, 2, 3, 4, 5].forEach(function(column) {
     sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, column).setBackground('#d9ead3');
   });
   var firstRow = TASK_TRACKER_CONFIG_.dataStartRow;
   var rows = sheet.getMaxRows() - TASK_TRACKER_CONFIG_.headerRow;
   var subtaskHeaders = getHeaders_(subtasksSheet);
   var subtaskProjectColumn = columnLetter_(columnNumber_(subtaskHeaders, 'Проект / область'));
-  var emptyRow = Array(10).fill('""').join(separator);
-  var header = function(title) {
-    return ['""', '""', '""', '"' + title + '"'].concat(Array(6).fill('""')).join(separator);
-  };
+  var emptyRow = Array(9).fill('""').join(separator);
+  var header = Array(9).fill('""').join(separator);
   var subtaskData = [
     '\'Подзадачи\'!$D$12:$D',
     '\'Подзадачи\'!$B$12:$B',
     "'Подзадачи'!$" + subtaskProjectColumn + "$12:$" + subtaskProjectColumn,
-    'IF(\'Подзадачи\'!$A$12:$A<>"";"";"")',
     'IF(REGEXMATCH(\'Подзадачи\'!$C$12:$C;"^routine_");"Рутина";"Подзадача")',
     '\'Подзадачи\'!$E$12:$E',
     '\'Подзадачи\'!$F$12:$F',
@@ -1770,37 +1767,47 @@ function ensurePlanDayShoppingSection_(spreadsheet, shoppingSheet, subtasksSheet
   ].join(separator);
   var commonCriteria = '\'Подзадачи\'!$A$12:$A<>"";\'Подзадачи\'!$F$12:$F<>"";\'Подзадачи\'!$E$12:$E<>"done";\'Подзадачи\'!$E$12:$E<>"cancelled";\'Подзадачи\'!$E$12:$E<>"skipped"';
   var dateBlock = function(title, criterion) {
-    return '{' + header(title) + '};IFERROR(SORT(FILTER({' + subtaskData + '};' + commonCriteria + ';' + criterion + ');7;TRUE);{' + emptyRow + '})';
+    return '{' + header + '};IFERROR(SORT(FILTER({' + subtaskData + '};' + commonCriteria + ';' + criterion + ');6;TRUE);{' + emptyRow + '})';
+  };
+  var sectionBlock = function(title, criterion) {
+    return '"' + title + '";IFERROR(FILTER(IF(\'Подзадачи\'!$A$12:$A<>"";"";"");' + commonCriteria + ';' + criterion + ');"")';
   };
   var shoppingData = [
     '\'Список покупок\'!$B$12:$B',
-    'IF(\'Список покупок\'!$A$12:$A<>"";"";"")',
-    'IF(\'Список покупок\'!$A$12:$A<>"";"";"")',
     'IF(\'Список покупок\'!$A$12:$A<>"";"";"")',
     'IF(\'Список покупок\'!$A$12:$A<>"";"";"")',
     'IF(\'Список покупок\'!$A$12:$A<>"";"Покупка";"")',
     '\'Список покупок\'!$C$12:$C',
     'IF(\'Список покупок\'!$A$12:$A<>"";"";"")',
     'IF(\'Список покупок\'!$A$12:$A<>"";"";"")',
+    'IF(\'Список покупок\'!$A$12:$A<>"";"";"")',
     '\'Список покупок\'!$H$12:$H'
   ].join(separator);
-  var shoppingBlock = '{' + header('🛒 Покупки') + '};IFERROR(FILTER({' + shoppingData + '};\'Список покупок\'!$A$12:$A<>"";\'Список покупок\'!$C$12:$C="new");{' + emptyRow + '})';
-  var formula = '=VSTACK(' + [
+  var shoppingBlock = '{' + header + '};IFERROR(FILTER({' + shoppingData + '};\'Список покупок\'!$A$12:$A<>"";\'Список покупок\'!$C$12:$C="new");{' + emptyRow + '})';
+  var coreFormula = '=VSTACK(' + [
     dateBlock('Просрочено', '\'Подзадачи\'!$F$12:$F<TODAY()'),
     dateBlock('Сегодня', '\'Подзадачи\'!$F$12:$F=TODAY()'),
     dateBlock('Завтра', '\'Подзадачи\'!$F$12:$F=TODAY()+1'),
     dateBlock('Послезавтра', '\'Подзадачи\'!$F$12:$F=TODAY()+2'),
     shoppingBlock
   ].join(';') + ')';
+  var sectionFormula = '=VSTACK(' + [
+    sectionBlock('Просрочено', '\'Подзадачи\'!$F$12:$F<TODAY()'),
+    sectionBlock('Сегодня', '\'Подзадачи\'!$F$12:$F=TODAY()'),
+    sectionBlock('Завтра', '\'Подзадачи\'!$F$12:$F=TODAY()+1'),
+    sectionBlock('Послезавтра', '\'Подзадачи\'!$F$12:$F=TODAY()+2'),
+    '"🛒 Покупки";IFERROR(FILTER(IF(\'Список покупок\'!$A$12:$A<>"";"";"");\'Список покупок\'!$A$12:$A<>"";\'Список покупок\'!$C$12:$C="new");"")'
+  ].join(';') + ')';
   // This range is fully generated. Clearing it removes legacy formulas that block the new spill.
   sheet.getRange(firstRow, 1, rows, 12).clearContent();
-  sheet.getRange(firstRow, 2).setFormula(formula);
+  sheet.getRange(firstRow, 1).setFormula(sectionFormula);
+  sheet.getRange(firstRow, 3).setFormula(coreFormula);
   var shoppingSheetId = shoppingSheet.getSheetId();
-  var idFormula = '=IF(F12="Покупка";IFERROR(INDEX(FILTER(\'Список покупок\'!$A$12:$A;\'Список покупок\'!$B$12:$B=B12;\'Список покупок\'!$C$12:$C=G12);1);"");IFERROR(INDEX(FILTER(\'Подзадачи\'!$A$12:$A;\'Подзадачи\'!$B$12:$B=C12;\'Подзадачи\'!$D$12:$D=B12;\'Подзадачи\'!$E$12:$E=G12;\'Подзадачи\'!$F$12:$F=H12);1);""))';
+  var idFormula = '=IF(F12="Покупка";IFERROR(INDEX(FILTER(\'Список покупок\'!$A$12:$A;\'Список покупок\'!$B$12:$B=C12;\'Список покупок\'!$C$12:$C=G12);1);"");IFERROR(INDEX(FILTER(\'Подзадачи\'!$A$12:$A;\'Подзадачи\'!$B$12:$B=D12;\'Подзадачи\'!$D$12:$D=C12;\'Подзадачи\'!$E$12:$E=G12;\'Подзадачи\'!$F$12:$F=H12);1);""))';
   var actionFormula = '=IF(L12="";"";IF(F12="Покупка";HYPERLINK("#gid=' + shoppingSheetId + '&range=C"&MATCH(L12;\'Список покупок\'!$A:$A;0);"Купить");HYPERLINK("#gid=1075089967&range=E"&MATCH(L12;\'Подзадачи\'!$A:$A;0);"Закрыть")))';
   sheet.getRange(firstRow, 12).setFormula(idFormula);
-  sheet.getRange(firstRow, 1).setFormula(actionFormula);
-  sheet.getRange(firstRow, 1, 1, 1).copyTo(sheet.getRange(firstRow, 1, rows, 1), SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
+  sheet.getRange(firstRow, 2).setFormula(actionFormula);
+  sheet.getRange(firstRow, 2, 1, 1).copyTo(sheet.getRange(firstRow, 2, rows, 1), SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
   sheet.getRange(firstRow, 12, 1, 1).copyTo(sheet.getRange(firstRow, 12, rows, 1), SpreadsheetApp.CopyPasteType.PASTE_FORMULA, false);
 }
 
