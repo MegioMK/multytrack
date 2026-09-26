@@ -523,10 +523,10 @@ def _non_text_message_title(message: dict[str, Any]) -> str:
     return ""
 
 
-PAGE_SIZE = 5
+PAGE_SIZE = 7
 
 
-def build_actionable_subtasks_digest(mode: str, page: int = 0) -> dict[str, Any]:
+def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "") -> dict[str, Any]:
     today = _now().date()
     selected: list[dict[str, str]] = []
     for item in _sheet_rows_with_numbers("Подзадачи", "A11:O1000"):
@@ -553,18 +553,20 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0) -> dict[str, Any]
     page = max(0, min(page, page_count - 1))
     start = page * PAGE_SIZE
     visible = selected[start:start + PAGE_SIZE]
-    lines = [heading, f"Подзадачи {start + 1}-{start + len(visible)} из {len(selected)}"]
+    lines = [heading]
+    if notice:
+        lines.append(notice)
+    lines.append(f"Подзадачи {start + 1}-{start + len(visible)} из {len(selected)}")
     keyboard = []
-    for item in visible:
+    for number, item in enumerate(visible, start=start + 1):
         title = item.get("Название") or "(без названия)"
         is_routine = str(item.get("Источник ID", "")).startswith("routine_")
         prefix = "🌿 " if is_routine else "• "
-        lines.append(prefix + escape(title))
-        button_title = title if len(title) <= 28 else title[:25] + "..."
-        keyboard.append([{
-            "text": "Done: " + button_title,
-            "callback_data": _done_callback_data(item),
-        }])
+        lines.append(f"{number}. {prefix}{escape(title)}")
+        keyboard.append([
+            {"text": f"✅ {number}. Готово", "callback_data": _subtask_callback_data("done", mode, page, item)},
+            {"text": f"↪️ {number}. Завтра", "callback_data": _subtask_callback_data("tomorrow", mode, page, item)},
+        ])
     navigation = []
     if page > 0:
         navigation.append({"text": "◀️ Назад", "callback_data": f"page:{mode}:{page - 1}"})
@@ -651,6 +653,43 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
         title = str(item.get("Покупка") or "Покупка")
         send_telegram_message(str(message["chat"]["id"]), f"✅ Отметил купленным: <b>{escape(title)}</b>.")
         return _telegram_callback_reply(callback_id, "Готово, отметил купленным.")
+    action_match = re.fullmatch(
+        r"(done|tomorrow):(today|hot):(\d+):(\d+):([0-9a-f]{8})",
+        str(callback.get("data") or ""),
+    )
+    if action_match:
+        action, mode = action_match.group(1), action_match.group(2)
+        page, row_number = int(action_match.group(3)), int(action_match.group(4))
+        item = _subtask_by_row_number(row_number)
+        if not item or not hmac.compare_digest(
+            action_match.group(5), _subtask_callback_signature(action, mode, page, row_number, item["ID"])
+        ):
+            return _telegram_callback_reply(callback_id, "Подзадача изменилась. Обновите список.", show_alert=True)
+        if item.get("Статус", "").lower() in {"done", "cancelled", "skipped"}:
+            return _telegram_callback_reply(callback_id, "Уже закрыта.")
+
+        title = str(item.get("Название") or item.get("Задача") or "Подзадача")
+        now = _now().isoformat(timespec="seconds")
+        if action == "done":
+            sheets_update_values("Подзадачи", f"E{row_number}:E{row_number}", [["done"]])
+            sheets_update_value_by_header("Подзадачи", row_number, "Дата закрытия", now)
+            notice = f"✅ Готово: <b>{escape(title)}</b>. Список обновлён."
+            callback_text = "Готово, обновил."
+        else:
+            tomorrow = (_now().date() + timedelta(days=1)).isoformat()
+            sheets_update_values("Подзадачи", f"F{row_number}:F{row_number}", [[tomorrow]])
+            notice = f"↪️ На завтра: <b>{escape(title)}</b>. Список обновлён."
+            callback_text = "Перенёс на завтра."
+        sheets_update_values("Подзадачи", f"L{row_number}:L{row_number}", [[now]])
+        digest = build_actionable_subtasks_digest(mode, page, notice)
+        edit_telegram_message(
+            str(message["chat"]["id"]),
+            int(message["message_id"]),
+            str(digest["text"]),
+            digest.get("reply_markup"),
+        )
+        return _telegram_callback_reply(callback_id, callback_text)
+
     match = re.fullmatch(r"done:(\d+):([0-9a-f]{8})", str(callback.get("data") or ""))
     if not match:
         return _telegram_callback_reply(callback_id, "Эта кнопка больше не действует.", show_alert=True)
@@ -829,6 +868,17 @@ def _done_callback_data(item: dict[str, str]) -> str:
 
 def _done_callback_signature(row_number: int, subtask_id: str) -> str:
     payload = f"done:{row_number}:{subtask_id}".encode("utf-8")
+    return hmac.new(_env("RELAY_SECRET").encode("utf-8"), payload, "sha256").hexdigest()[:8]
+
+
+def _subtask_callback_data(action: str, mode: str, page: int, item: dict[str, str]) -> str:
+    row_number = int(item["__row_number"])
+    signature = _subtask_callback_signature(action, mode, page, row_number, item["ID"])
+    return f"{action}:{mode}:{page}:{row_number}:{signature}"
+
+
+def _subtask_callback_signature(action: str, mode: str, page: int, row_number: int, subtask_id: str) -> str:
+    payload = f"{action}:{mode}:{page}:{row_number}:{subtask_id}".encode("utf-8")
     return hmac.new(_env("RELAY_SECRET").encode("utf-8"), payload, "sha256").hexdigest()[:8]
 
 
