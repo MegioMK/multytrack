@@ -796,7 +796,9 @@ function sendDailyPlanIfDue_() {
   var timezone = spreadsheet.getSpreadsheetTimeZone();
   var now = new Date();
   var currentTime = Utilities.formatDate(now, timezone, 'HH:mm');
-  if (currentTime < '07:30' || currentTime >= '08:00') {
+  // A minute trigger can occasionally miss the exact half-hour window. Keep a
+  // one-time catch-up window through noon rather than silently losing the plan.
+  if (currentTime < '07:30' || currentTime >= '12:00') {
     return;
   }
 
