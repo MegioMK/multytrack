@@ -564,7 +564,8 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "")
     for number, item in enumerate(visible, start=start + 1):
         title = item.get("Название") or "(без названия)"
         is_routine = str(item.get("Источник ID", "")).startswith("routine_")
-        prefix = "🌿 " if is_routine else "• "
+        is_event = str(item.get("Источник ID", "")).startswith("event_")
+        prefix = "🌿 " if is_routine else ("🗓️ " if is_event else "• ")
         lines.append(f"{number}. {prefix}{escape(title)}")
         actions = [{"text": f"✅ {number}. Готово", "callback_data": _subtask_callback_data("done", mode, page, item)}]
         if not is_routine or routine_repetitions.get(str(item.get("Источник ID") or "")) != "ежедневно":

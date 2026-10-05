@@ -6,6 +6,7 @@ var TASK_TRACKER_CONFIG_ = {
   tasksSheet: 'Задачи',
   subtasksSheet: 'Подзадачи',
   routinesSheet: 'Рутины',
+  eventsSheet: 'Важные события',
   shoppingSheet: 'Список покупок',
   referencesSheet: 'Справочники',
   settingsSheet: 'Настройки',
@@ -23,7 +24,10 @@ var TASK_PRIORITIES_ = ['1', '2', '3'];
 var INCOMING_STATUSES_ = WORK_STATUSES_;
 var INCOMING_TYPES_ = ['задача', 'рутина', 'покупка'];
 var ROUTINE_STATUSES_ = ['active', 'paused', 'archived'];
+var EVENT_STATUSES_ = ['active', 'paused', 'archived'];
 var ROUTINE_REPEAT_RULES_ = ['ежедневно', 'еженедельно', 'каждые N дней', 'каждые N недель', 'ежемесячно', 'ежегодно', 'вручную'];
+var EVENT_REPEAT_RULES_ = ['один раз', 'ежегодно'];
+var YES_NO_OPTIONS_ = ['да', 'нет'];
 var CLOSED_STATUSES_ = ['done', 'cancelled', 'skipped'];
 
 function onOpen() {
@@ -129,6 +133,10 @@ function onIncomingTaskDraftEdit(event) {
 
   if (sheet.getName() === TASK_TRACKER_CONFIG_.routinesSheet) {
     syncRoutineOccurrences_(true);
+    return;
+  }
+  if (sheet.getName() === TASK_TRACKER_CONFIG_.eventsSheet) {
+    syncImportantEventOccurrences_();
   }
 }
 
@@ -142,6 +150,7 @@ function runTaskTrackerAutomation() {
   refreshSubtaskChecks();
   syncTaskStatusesFromSubtasks_();
   syncRoutineOccurrences_(false);
+  syncImportantEventOccurrences_();
   createDailySummaryIfDue_();
   createWeeklySummaryIfDue_();
   sendWeeklyReflectionIfDue_();
@@ -162,6 +171,7 @@ function runTaskTrackerAutomationNow() {
   refreshSubtaskChecks();
   syncTaskStatusesFromSubtasks_();
   syncRoutineOccurrences_(false);
+  syncImportantEventOccurrences_();
 }
 
 // "Задача создана" допустима только пока все сохраненные ID существуют в листе задач.
@@ -1200,6 +1210,7 @@ function ensureTaskTrackerSchema_() {
   ensurePlanDayShoppingSection_(spreadsheet, shoppingSheet, subtasksSheet);
   var routinesSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.routinesSheet);
   ensureRoutineColumns_(routinesSheet);
+  var eventsSheet = ensureImportantEventsSheet_(spreadsheet);
   var tasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.tasksSheet);
   ensureColumn_(tasksSheet, 'Дата закрытия');
   ensureColumn_(subtasksSheet, 'Дата закрытия');
@@ -1217,6 +1228,10 @@ function ensureTaskTrackerSchema_() {
   applyReferenceValidation_(routinesSheet, 'Статус', referencesSheet, 'Статусы рутин');
   applyReferenceValidation_(routinesSheet, 'Повторение', referencesSheet, 'Повторение');
   applyReferenceValidation_(routinesSheet, 'Категория', referencesSheet, 'Категории рутин');
+  applyReferenceValidation_(eventsSheet, 'Статус', referencesSheet, 'Статусы событий');
+  applyReferenceValidation_(eventsSheet, 'Повторение', referencesSheet, 'Повторение событий');
+  applyReferenceValidation_(eventsSheet, 'Делать подарок', referencesSheet, 'Да / нет');
+  applyReferenceValidation_(eventsSheet, 'Готовить мероприятие', referencesSheet, 'Да / нет');
 }
 
 function ensureSummarySheets_(spreadsheet) {
@@ -1558,7 +1573,7 @@ function ensureReferencesSheet_(spreadsheet, incomingSheet, tasksSheet, routines
   }
 
   migrateReferencesLayout_(sheet);
-  var headers = ['Статусы работы', 'Статусы рутин', 'Проекты / области', 'Типы', 'Приоритеты', 'Повторение', 'Категории рутин'];
+  var headers = ['Статусы работы', 'Статусы рутин', 'Проекты / области', 'Типы', 'Приоритеты', 'Повторение', 'Категории рутин', 'Статусы событий', 'Повторение событий', 'Да / нет'];
   sheet.getRange(1, 1).setValue('Дополняйте списки ниже: все выпадающие поля таблицы берут значения отсюда.');
   sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length).setValues([headers]);
   sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length)
@@ -1569,14 +1584,17 @@ function ensureReferencesSheet_(spreadsheet, incomingSheet, tasksSheet, routines
   var defaults = {
     'Статусы работы': WORK_STATUSES_,
     'Статусы рутин': ROUTINE_STATUSES_,
+    'Статусы событий': EVENT_STATUSES_,
     'Типы': INCOMING_TYPES_,
     'Приоритеты': TASK_PRIORITIES_,
     'Повторение': ROUTINE_REPEAT_RULES_,
+    'Повторение событий': EVENT_REPEAT_RULES_,
+    'Да / нет': YES_NO_OPTIONS_,
     'Категории рутин': collectDistinctValues_(routinesSheet, 'Категория')
   };
 
   headers.forEach(function(header, index) {
-    if (header === 'Статусы работы' || header === 'Статусы рутин') {
+    if (header === 'Статусы работы' || header === 'Статусы рутин' || header === 'Статусы событий') {
       setReferenceValues_(sheet, index + 1, defaults[header]);
     } else if (header !== 'Проекты / области') {
       appendMissingReferenceValues_(sheet, index + 1, defaults[header]);
@@ -1740,6 +1758,33 @@ function ensureShoppingSheet_(spreadsheet) {
   return sheet;
 }
 
+function ensureImportantEventsSheet_(spreadsheet) {
+  var sheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.eventsSheet);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(TASK_TRACKER_CONFIG_.eventsSheet);
+    sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
+  }
+  var headers = [
+    'ID', 'Событие', 'Дата события', 'Повторение', 'Статус',
+    'Делать подарок', 'За сколько дней купить подарок',
+    'Готовить мероприятие', 'За сколько дней подготовить мероприятие',
+    'Оценка подарка, мин', 'Оценка подготовки, мин', 'Заметки', 'Обновлено'
+  ];
+  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length).setFontWeight('bold').setBackground('#e6e6e6');
+  [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].forEach(function(column) {
+    sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, column).setBackground('#fbc965');
+  });
+  sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
+  sheet.setColumnWidth(1, 190);
+  sheet.setColumnWidth(2, 280);
+  sheet.setColumnWidth(3, 120);
+  sheet.setColumnWidth(7, 180);
+  sheet.setColumnWidth(9, 230);
+  sheet.setColumnWidth(12, 280);
+  return sheet;
+}
+
 function ensurePlanDayShoppingSection_(spreadsheet, shoppingSheet, subtasksSheet) {
   var sheet = spreadsheet.getSheetByName('План дня');
   var separator = '\\';
@@ -1761,7 +1806,7 @@ function ensurePlanDayShoppingSection_(spreadsheet, shoppingSheet, subtasksSheet
     '\'Подзадачи\'!$D$12:$D',
     '\'Подзадачи\'!$B$12:$B',
     "'Подзадачи'!$" + subtaskProjectColumn + "$12:$" + subtaskProjectColumn,
-    'IF(REGEXMATCH(\'Подзадачи\'!$C$12:$C;"^routine_");"Рутина";"Подзадача")',
+    'IF(REGEXMATCH(\'Подзадачи\'!$C$12:$C;"^routine_");"Рутина";IF(REGEXMATCH(\'Подзадачи\'!$C$12:$C;"^event_");"Событие";"Подзадача"))',
     '\'Подзадачи\'!$E$12:$E',
     '\'Подзадачи\'!$F$12:$F',
     '\'Подзадачи\'!$G$12:$G',
@@ -2294,6 +2339,93 @@ function isDailyRoutine_(routine) {
   return String(routine.Повторение || '').toLowerCase() === 'ежедневно';
 }
 
+function syncImportantEventOccurrences_() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  try {
+    var spreadsheet = getTrackerSpreadsheet_();
+    var eventsSheet = ensureImportantEventsSheet_(spreadsheet);
+    var subtasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.subtasksSheet);
+    if (!hasDataRows_(eventsSheet)) return;
+    var eventHeaders = getHeaders_(eventsSheet);
+    var subtaskHeaders = getHeaders_(subtasksSheet);
+    var subtasks = hasDataRows_(subtasksSheet) ? subtasksSheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(subtasksSheet), subtaskHeaders.length).getValues().map(function(row, index) {
+      return { item: rowToObject_(subtaskHeaders, row), rowNumber: index + TASK_TRACKER_CONFIG_.dataStartRow };
+    }) : [];
+    var knownIds = {};
+    subtasks.forEach(function(entry) { knownIds[String(entry.item.ID || '')] = entry; });
+    var additions = [];
+    var today = startOfDay_(new Date());
+    eventsSheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(eventsSheet), eventHeaders.length).getValues().forEach(function(row, index) {
+      var event = rowToObject_(eventHeaders, row);
+      var rowNumber = index + TASK_TRACKER_CONFIG_.dataStartRow;
+      if (!event.Событие) return;
+      var updates = {};
+      if (!event.ID) { updates.ID = 'event_' + new Date().getTime() + '_' + index; event.ID = updates.ID; }
+      if (!event.Повторение) { updates.Повторение = 'ежегодно'; event.Повторение = 'ежегодно'; }
+      if (!event.Статус) { updates.Статус = 'active'; event.Статус = 'active'; }
+      if (!event['Делать подарок']) { updates['Делать подарок'] = 'нет'; event['Делать подарок'] = 'нет'; }
+      if (!event['Готовить мероприятие']) { updates['Готовить мероприятие'] = 'нет'; event['Готовить мероприятие'] = 'нет'; }
+      if (event['За сколько дней купить подарок'] === '') { updates['За сколько дней купить подарок'] = 7; event['За сколько дней купить подарок'] = 7; }
+      if (event['За сколько дней подготовить мероприятие'] === '') { updates['За сколько дней подготовить мероприятие'] = 7; event['За сколько дней подготовить мероприятие'] = 7; }
+      if (event['Оценка подарка, мин'] === '') { updates['Оценка подарка, мин'] = 30; event['Оценка подарка, мин'] = 30; }
+      if (event['Оценка подготовки, мин'] === '') { updates['Оценка подготовки, мин'] = 60; event['Оценка подготовки, мин'] = 60; }
+      var eventDate = routineDate_(event['Дата события']);
+      if (!eventDate || String(event.Статус).toLowerCase() !== 'active') {
+        if (Object.keys(updates).length) { updates.Обновлено = nowIso_(); setObjectFields_(eventsSheet, eventHeaders, rowNumber, updates); }
+        return;
+      }
+      if (eventDate.getTime() < today.getTime()) {
+        closeExpiredEventSubtasks_(subtasksSheet, subtaskHeaders, subtasks, String(event.ID), routineDateKey_(eventDate));
+        if (String(event.Повторение).toLowerCase() === 'ежегодно') {
+          while (eventDate.getTime() < today.getTime()) eventDate = addMonthsKeepingDay_(eventDate, 12);
+          updates['Дата события'] = eventDate;
+          event['Дата события'] = eventDate;
+        } else { updates.Статус = 'archived'; event.Статус = 'archived'; }
+      }
+      if (String(event.Статус).toLowerCase() === 'active') {
+        eventSubtaskDefinitions_(event, eventDate).forEach(function(definition) {
+          var id = eventSubtaskId_(event.ID, eventDate, definition.kind);
+          if (knownIds[id]) return;
+          additions.push(objectToRow_(subtaskHeaders, {
+            ID: id, Задача: 'Важное событие: ' + event.Событие, Название: definition.title,
+            Статус: 'new', Дата: definition.date, 'Оценка, мин': definition.estimate,
+            Обновлено: nowIso_(), Заметки: 'Создано автоматически из важного события.', 'Источник ID': event.ID
+          }));
+          knownIds[id] = { item: { ID: id } };
+        });
+      }
+      if (Object.keys(updates).length) { updates.Обновлено = nowIso_(); setObjectFields_(eventsSheet, eventHeaders, rowNumber, updates); }
+    });
+    if (additions.length) subtasksSheet.getRange(nextDataRow_(subtasksSheet), 1, additions.length, subtaskHeaders.length).setValues(additions);
+  } finally { lock.releaseLock(); }
+}
+
+function eventSubtaskDefinitions_(event, eventDate) {
+  var definitions = [{ kind: 'event', title: 'Важное событие: ' + event.Событие, date: eventDate, estimate: '' }];
+  if (String(event['Делать подарок']).toLowerCase() === 'да') definitions.push({ kind: 'gift', title: 'Купить подарок: ' + event.Событие, date: shiftDate_(eventDate, -Math.max(Number(event['За сколько дней купить подарок']) || 0, 0)), estimate: event['Оценка подарка, мин'] || 30 });
+  if (String(event['Готовить мероприятие']).toLowerCase() === 'да') definitions.push({ kind: 'prepare', title: 'Подготовить мероприятие: ' + event.Событие, date: shiftDate_(eventDate, -Math.max(Number(event['За сколько дней подготовить мероприятие']) || 0, 0)), estimate: event['Оценка подготовки, мин'] || 60 });
+  return definitions;
+}
+
+function closeExpiredEventSubtasks_(sheet, headers, subtasks, eventId, dateKey) {
+  var prefix = 'subtask_event_' + String(eventId).replace(/[^a-zA-Z0-9_]/g, '_') + '_' + dateKey.replace(/-/g, '') + '_';
+  subtasks.forEach(function(entry) {
+    if (String(entry.item.ID || '').indexOf(prefix) !== 0 || isClosed_(entry.item.Статус)) return;
+    setObjectFields_(sheet, headers, entry.rowNumber, { Статус: 'skipped', Обновлено: nowIso_() });
+  });
+}
+
+function eventSubtaskId_(eventId, eventDate, kind) {
+  return 'subtask_event_' + String(eventId).replace(/[^a-zA-Z0-9_]/g, '_') + '_' + routineDateKey_(eventDate).replace(/-/g, '') + '_' + kind;
+}
+
+function shiftDate_(date, days) {
+  var shifted = new Date(date.getTime());
+  shifted.setDate(shifted.getDate() + Number(days || 0));
+  return startOfDay_(shifted);
+}
+
 function nextRoutineDateOnOrAfterToday_(value, rule, interval) {
   var next = routineDate_(value);
   if (!next || String(rule || '').toLowerCase() === 'вручную') {
@@ -2498,6 +2630,9 @@ function subtaskCheck_(subtask) {
   if (isClosed_(subtask.Статус)) {
     return 'Закрыта';
   }
+  if (isEventSourceId_(subtask['Источник ID'])) {
+    return '';
+  }
   if (!subtask['Источник ID']) {
     return subtask.Задача ? 'Уточнить задачу: найдено несколько или нет совпадений' : 'Не указана задача или рутина';
   }
@@ -2518,6 +2653,10 @@ function subtaskCheck_(subtask) {
 
 function isRoutineSourceId_(sourceId) {
   return String(sourceId || '').indexOf('routine_') === 0;
+}
+
+function isEventSourceId_(sourceId) {
+  return String(sourceId || '').indexOf('event_') === 0;
 }
 
 // Старые рутинные строки могли быть созданы до единого «Источник ID».
