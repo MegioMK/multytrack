@@ -553,6 +553,9 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "")
     page = max(0, min(page, page_count - 1))
     start = page * PAGE_SIZE
     visible = selected[start:start + PAGE_SIZE]
+    routine_repetitions = _routine_repetitions(
+        {str(item.get("Источник ID") or "") for item in visible if str(item.get("Источник ID") or "").startswith("routine_")}
+    )
     lines = [heading]
     if notice:
         lines.append(notice)
@@ -563,10 +566,12 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "")
         is_routine = str(item.get("Источник ID", "")).startswith("routine_")
         prefix = "🌿 " if is_routine else "• "
         lines.append(f"{number}. {prefix}{escape(title)}")
-        keyboard.append([
-            {"text": f"✅ {number}. Готово", "callback_data": _subtask_callback_data("done", mode, page, item)},
-            {"text": f"↪️ {number}. Завтра", "callback_data": _subtask_callback_data("tomorrow", mode, page, item)},
-        ])
+        actions = [{"text": f"✅ {number}. Готово", "callback_data": _subtask_callback_data("done", mode, page, item)}]
+        if not is_routine or routine_repetitions.get(str(item.get("Источник ID") or "")) != "ежедневно":
+            actions.append({"text": f"↪️ {number}. Завтра", "callback_data": _subtask_callback_data("tomorrow", mode, page, item)})
+        if is_routine:
+            actions.append({"text": f"⏭ {number}. Пропустить", "callback_data": _subtask_callback_data("skip", mode, page, item)})
+        keyboard.append(actions)
     navigation = []
     if page > 0:
         navigation.append({"text": "◀️ Назад", "callback_data": f"page:{mode}:{page - 1}"})
@@ -654,7 +659,7 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
         send_telegram_message(str(message["chat"]["id"]), f"✅ Отметил купленным: <b>{escape(title)}</b>.")
         return _telegram_callback_reply(callback_id, "Готово, отметил купленным.")
     action_match = re.fullmatch(
-        r"(done|tomorrow):(today|hot):(\d+):(\d+):([0-9a-f]{8})",
+        r"(done|tomorrow|skip):(today|hot):(\d+):(\d+):([0-9a-f]{8})",
         str(callback.get("data") or ""),
     )
     if action_match:
@@ -675,11 +680,22 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
             sheets_update_value_by_header("Подзадачи", row_number, "Дата закрытия", now)
             notice = f"✅ Готово: <b>{escape(title)}</b>. Список обновлён."
             callback_text = "Готово, обновил."
-        else:
+        elif action == "tomorrow":
             tomorrow = (_now().date() + timedelta(days=1)).isoformat()
+            routine = _routine_by_id(str(item.get("Источник ID") or ""))
+            if routine and str(routine.get("Повторение") or "").strip().lower() == "ежедневно":
+                return _telegram_callback_reply(callback_id, "Ежедневную рутину лучше пропустить: завтра появится новый экземпляр.", show_alert=True)
             sheets_update_values("Подзадачи", f"F{row_number}:F{row_number}", [[tomorrow]])
+            if routine:
+                sheets_update_value_by_header("Рутины", int(routine["__row_number"]), "Следующая дата", tomorrow)
             notice = f"↪️ На завтра: <b>{escape(title)}</b>. Список обновлён."
             callback_text = "Перенёс на завтра."
+        else:
+            if not str(item.get("Источник ID") or "").startswith("routine_"):
+                return _telegram_callback_reply(callback_id, "Пропустить можно только рутину.", show_alert=True)
+            sheets_update_values("Подзадачи", f"E{row_number}:E{row_number}", [["skipped"]])
+            notice = f"⏭ Пропущено: <b>{escape(title)}</b>. Следующий повтор появится по расписанию."
+            callback_text = "Пропуск записан."
         sheets_update_values("Подзадачи", f"L{row_number}:L{row_number}", [[now]])
         digest = build_actionable_subtasks_digest(mode, page, notice)
         edit_telegram_message(
@@ -852,6 +868,25 @@ def _subtask_by_row_number(row_number: int) -> dict[str, str] | None:
         return None
     rows = _sheet_rows_with_numbers("Подзадачи", f"A11:O{row_number}")
     return next((row for row in rows if int(row["__row_number"]) == row_number), None)
+
+
+def _routine_repetitions(routine_ids: set[str]) -> dict[str, str]:
+    if not routine_ids:
+        return {}
+    return {
+        str(row.get("ID") or ""): str(row.get("Повторение") or "").strip().lower()
+        for row in _sheet_rows_with_numbers("Рутины", "A11:M1000")
+        if str(row.get("ID") or "") in routine_ids
+    }
+
+
+def _routine_by_id(routine_id: str) -> dict[str, str] | None:
+    if not routine_id.startswith("routine_"):
+        return None
+    return next(
+        (row for row in _sheet_rows_with_numbers("Рутины", "A11:M1000") if str(row.get("ID") or "") == routine_id),
+        None,
+    )
 
 
 def _purchase_by_row_number(row_number: int) -> dict[str, str] | None:

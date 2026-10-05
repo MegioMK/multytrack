@@ -98,6 +98,7 @@ function onIncomingTaskDraftEdit(event) {
       updateClosedDates_(sheet, subtaskHeaders, event.range, 'Статус', 'Дата закрытия');
       touchSubtaskUpdated_(event.range);
       completeRoutineFromSubtask_(event.range.getRow(), true);
+      skipRoutineFromSubtask_(event.range.getRow(), true);
       syncTaskStatusesFromSubtasks_();
     }
     return;
@@ -2108,6 +2109,10 @@ function syncRoutineOccurrences_(refreshCurrentOccurrence) {
     }
 
     if (current && isClosed_(current.item.Статус)) {
+      if (String(current.item.Статус || '').toLowerCase() === 'skipped') {
+        skipRoutineFromSubtask_(current.rowNumber, false);
+        return;
+      }
       completeRoutineFromSubtask_(current.rowNumber);
       var closedDate = routineDate_(current.item.Дата);
       var todayForClosed = startOfDay_(new Date());
@@ -2209,7 +2214,7 @@ function completeRoutineFromSubtask_(rowNumber, createNextNow) {
   var subtasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.subtasksSheet);
   var subtaskHeaders = getHeaders_(subtasksSheet);
   var subtask = rowToObject_(subtaskHeaders, subtasksSheet.getRange(rowNumber, 1, 1, subtaskHeaders.length).getValues()[0]);
-  if (!isRoutineSourceId_(subtask['Источник ID']) || !isClosed_(subtask.Статус)) {
+  if (!isRoutineSourceId_(subtask['Источник ID']) || String(subtask.Статус || '').toLowerCase() !== 'done') {
     return;
   }
 
@@ -2239,6 +2244,43 @@ function completeRoutineFromSubtask_(rowNumber, createNextNow) {
     completedRoutine = true;
   });
   if (completedRoutine && createNextNow) {
+    syncRoutineOccurrences_(false);
+  }
+}
+
+// Пропуск закрывает только конкретный экземпляр: это не выполнение и не
+// должно попадать в «Последнее выполнение», но следующее повторение сохраняется.
+function skipRoutineFromSubtask_(rowNumber, createNextNow) {
+  var spreadsheet = getTrackerSpreadsheet_();
+  var subtasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.subtasksSheet);
+  var subtaskHeaders = getHeaders_(subtasksSheet);
+  var subtask = rowToObject_(subtaskHeaders, subtasksSheet.getRange(rowNumber, 1, 1, subtaskHeaders.length).getValues()[0]);
+  if (!isRoutineSourceId_(subtask['Источник ID']) || String(subtask.Статус || '').toLowerCase() !== 'skipped') {
+    return;
+  }
+
+  var routinesSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.routinesSheet);
+  if (!hasDataRows_(routinesSheet)) {
+    return;
+  }
+  var routineHeaders = getHeaders_(routinesSheet);
+  var routines = routinesSheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(routinesSheet), routineHeaders.length).getValues();
+  var skippedRoutine = false;
+  routines.forEach(function(row, index) {
+    var routine = rowToObject_(routineHeaders, row);
+    if (String(routine.ID) !== String(subtask['Источник ID']) ||
+        String(routine['Текущая подзадача ID']) !== String(subtask.ID)) {
+      return;
+    }
+    var scheduledDate = routineDate_(subtask.Дата || routine['Следующая дата']);
+    var nextDate = nextRoutineDateAfterToday_(scheduledDate, routine.Повторение, routine.Интервал);
+    setObjectFields_(routinesSheet, routineHeaders, index + TASK_TRACKER_CONFIG_.dataStartRow, {
+      'Следующая дата': nextDate || '',
+      'Текущая подзадача ID': ''
+    });
+    skippedRoutine = true;
+  });
+  if (skippedRoutine && createNextNow) {
     syncRoutineOccurrences_(false);
   }
 }
