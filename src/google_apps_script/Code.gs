@@ -22,7 +22,7 @@ var TASK_TRACKER_CONFIG_ = {
 var WORK_STATUSES_ = ['new', 'planned', 'in_progress', 'blocked', 'done', 'cancelled', 'skipped'];
 var TASK_PRIORITIES_ = ['1', '2', '3'];
 var INCOMING_STATUSES_ = WORK_STATUSES_;
-var INCOMING_TYPES_ = ['задача', 'рутина', 'покупка'];
+var INCOMING_TYPES_ = ['задача', 'рутина', 'покупка', 'событие'];
 var ROUTINE_STATUSES_ = ['active', 'paused', 'archived'];
 var EVENT_STATUSES_ = ['active', 'paused', 'archived'];
 var ROUTINE_REPEAT_RULES_ = ['ежедневно', 'еженедельно', 'каждые N дней', 'каждые N недель', 'ежемесячно', 'ежегодно', 'вручную'];
@@ -180,6 +180,7 @@ function reconcileIncomingTaskLinks_() {
   var incomingSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.incomingSheet);
   var tasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.tasksSheet);
   var routinesSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.routinesSheet);
+  var eventsSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.eventsSheet);
   var incomingHeaders = getHeaders_(incomingSheet);
   var taskHeaders = getHeaders_(tasksSheet);
   if (!hasDataRows_(incomingSheet)) {
@@ -200,6 +201,12 @@ function reconcileIncomingTaskLinks_() {
       if (row[0]) {
         createdIds[String(row[0]).trim()] = true;
       }
+    });
+  }
+  if (eventsSheet && hasDataRows_(eventsSheet)) {
+    var eventHeaders = getHeaders_(eventsSheet);
+    eventsSheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, columnNumber_(eventHeaders, 'ID'), dataRowCount_(eventsSheet), 1).getValues().forEach(function(row) {
+      if (row[0]) createdIds[String(row[0]).trim()] = true;
     });
   }
 
@@ -279,6 +286,9 @@ function promoteIncomingRow_(rowNumber) {
 
   if (isRoutineIncoming_(incoming['Предложенный тип'])) {
     return promoteIncomingToRoutines_(incomingSheet, incomingHeaders, incoming, rowNumber, titles);
+  }
+  if (isEventIncoming_(incoming['Предложенный тип'])) {
+    return promoteIncomingToEvents_(incomingSheet, incomingHeaders, incoming, rowNumber, titles);
   }
 
   var tasksSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.tasksSheet);
@@ -361,6 +371,40 @@ function promoteIncomingToRoutines_(incomingSheet, incomingHeaders, incoming, ro
   });
   clearDraftState_(incoming.ID);
   return true;
+}
+
+function promoteIncomingToEvents_(incomingSheet, incomingHeaders, incoming, rowNumber, titles) {
+  var spreadsheet = getTrackerSpreadsheet_();
+  var eventsSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.eventsSheet);
+  var eventHeaders = getHeaders_(eventsSheet);
+  var existingEvents = getExistingImportantEvents_(eventsSheet, eventHeaders);
+  var eventRows = [];
+  var eventIds = [];
+  titles.forEach(function(title, index) {
+    var duplicate = existingEvents.filter(function(event) { return taskTextsOverlap_(title, event.Событие); })[0];
+    if (duplicate) { eventIds.push(duplicate.ID); return; }
+    var eventId = 'event_' + String(incoming.ID) + '_' + (index + 1);
+    eventIds.push(eventId);
+    eventRows.push(objectToRow_(eventHeaders, {
+      ID: eventId, Событие: title, Повторение: 'ежегодно', Статус: 'active',
+      'Делать подарок': 'нет', 'За сколько дней купить подарок': 7,
+      'Готовить мероприятие': 'нет', 'За сколько дней подготовить мероприятие': 7,
+      'Оценка подарка, мин': 30, 'Оценка подготовки, мин': 60,
+      Заметки: appendIncomingNote_(incoming.Заметки, incoming.ID), Обновлено: nowIso_()
+    }));
+    existingEvents.push({ ID: eventId, Событие: title });
+  });
+  if (eventRows.length) eventsSheet.getRange(nextDataRow_(eventsSheet), 1, eventRows.length, eventHeaders.length).setValues(eventRows);
+  setObjectFields_(incomingSheet, incomingHeaders, rowNumber, { 'Статус разбора': 'done', 'Созданные задачи ID': eventIds.join(', ') });
+  clearDraftState_(incoming.ID);
+  return true;
+}
+
+function getExistingImportantEvents_(sheet, headers) {
+  if (!hasDataRows_(sheet)) return [];
+  return sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(sheet), headers.length).getValues().map(function(row) {
+    return rowToObject_(headers, row);
+  }).filter(function(event) { return event.ID && event.Событие; });
 }
 
 // Покупка независима от задачи: та же строка Входящих может позднее создать задачу.
@@ -2675,6 +2719,10 @@ function normalizeIncomingType_(value) {
 
 function isRoutineIncoming_(value) {
   return normalizeIncomingType_(value) === 'рутина';
+}
+
+function isEventIncoming_(value) {
+  return normalizeIncomingType_(value) === 'событие';
 }
 
 function isShoppingIncoming_(value) {
