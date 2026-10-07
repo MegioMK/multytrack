@@ -368,10 +368,13 @@ def _new_incoming_count() -> int:
     headers = values[0]
     try:
         status_index = headers.index("Статус разбора")
+        type_index = headers.index("Предложенный тип")
     except ValueError:
         return 0
     return sum(
-        len(row) > status_index and str(row[status_index]).strip().lower() == "new"
+        len(row) > status_index
+        and str(row[status_index]).strip().lower() == "new"
+        and (len(row) <= type_index or str(row[type_index]).strip().lower() != "покупка")
         for row in values[1:]
     )
 
@@ -584,7 +587,7 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "")
     return {"text": "\n".join(lines), "reply_markup": {"inline_keyboard": keyboard}}
 
 
-def build_actionable_shopping_digest(page: int = 0) -> dict[str, Any]:
+def build_actionable_shopping_digest(page: int = 0, notice: str = "") -> dict[str, Any]:
     closed_statuses = {"done", "cancelled", "skipped"}
     selected = [
         item for item in _sheet_rows_with_numbers("Список покупок", "A11:H1000")
@@ -599,7 +602,10 @@ def build_actionable_shopping_digest(page: int = 0) -> dict[str, Any]:
     page = max(0, min(page, page_count - 1))
     start = page * PAGE_SIZE
     visible = selected[start:start + PAGE_SIZE]
-    lines = [heading, f"Покупки {start + 1}-{start + len(visible)} из {len(selected)}"]
+    lines = [heading]
+    if notice:
+        lines.append(notice)
+    lines.append(f"Покупки {start + 1}-{start + len(visible)} из {len(selected)}")
     keyboard = []
     for item in visible:
         title = item["Покупка"]
@@ -607,7 +613,7 @@ def build_actionable_shopping_digest(page: int = 0) -> dict[str, Any]:
         button_title = title if len(title) <= 28 else title[:25] + "..."
         keyboard.append([{
             "text": "Куплено: " + button_title,
-            "callback_data": _purchase_callback_data(item),
+            "callback_data": _purchase_callback_data(item, page),
         }])
     navigation = []
     if page > 0:
@@ -645,11 +651,12 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
             digest.get("reply_markup"),
         )
         return _telegram_callback_reply(callback_id, "Показала следующую страницу.")
-    purchase_match = re.fullmatch(r"purchase:(\d+):([0-9a-f]{8})", str(callback.get("data") or ""))
+    purchase_match = re.fullmatch(r"purchase:(?:(\d+):)?(\d+):([0-9a-f]{8})", str(callback.get("data") or ""))
     if purchase_match:
-        row_number = int(purchase_match.group(1))
+        page = int(purchase_match.group(1) or 0)
+        row_number = int(purchase_match.group(2))
         item = _purchase_by_row_number(row_number)
-        if not item or not hmac.compare_digest(purchase_match.group(2), _purchase_callback_signature(row_number, item["ID"])):
+        if not item or not hmac.compare_digest(purchase_match.group(3), _purchase_callback_signature(row_number, item["ID"])):
             return _telegram_callback_reply(callback_id, "Покупка изменилась. Обновите список.", show_alert=True)
         if item.get("Статус", "").lower() in {"done", "cancelled", "skipped"}:
             return _telegram_callback_reply(callback_id, "Уже отмечена.")
@@ -657,7 +664,13 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
         sheets_update_values("Список покупок", f"G{row_number}:G{row_number}", [[_now().isoformat(timespec="seconds")]])
         sheets_update_value_by_header("Список покупок", row_number, "Дата закрытия", _now().isoformat(timespec="seconds"))
         title = str(item.get("Покупка") or "Покупка")
-        send_telegram_message(str(message["chat"]["id"]), f"✅ Отметил купленным: <b>{escape(title)}</b>.")
+        digest = build_actionable_shopping_digest(page, f"✅ Куплено: <b>{escape(title)}</b>. Список обновлён.")
+        edit_telegram_message(
+            str(message["chat"]["id"]),
+            int(message["message_id"]),
+            str(digest["text"]),
+            digest.get("reply_markup"),
+        )
         return _telegram_callback_reply(callback_id, "Готово, отметил купленным.")
     action_match = re.fullmatch(
         r"(done|tomorrow|skip):(today|hot):(\d+):(\d+):([0-9a-f]{8})",
@@ -918,9 +931,9 @@ def _subtask_callback_signature(action: str, mode: str, page: int, row_number: i
     return hmac.new(_env("RELAY_SECRET").encode("utf-8"), payload, "sha256").hexdigest()[:8]
 
 
-def _purchase_callback_data(item: dict[str, str]) -> str:
+def _purchase_callback_data(item: dict[str, str], page: int = 0) -> str:
     row_number = int(item["__row_number"])
-    return f"purchase:{row_number}:{_purchase_callback_signature(row_number, item['ID'])}"
+    return f"purchase:{page}:{row_number}:{_purchase_callback_signature(row_number, item['ID'])}"
 
 
 def _purchase_callback_signature(row_number: int, purchase_id: str) -> str:
