@@ -62,10 +62,23 @@ async function sendTelegramAction(request, env) {
   }
 
   const isNotification = payload?.mode === "send_notification" && payload.chat_id && payload.text;
+  const isNotifications = payload?.mode === "send_notifications" && payload.chat_id && Array.isArray(payload.texts);
   const isReaction = payload?.mode === "set_reaction" && payload.chat_id && payload.message_id;
   const isEdit = payload?.mode === "edit_message" && payload.chat_id && payload.message_id && payload.text;
-  if (!isNotification && !isReaction && !isEdit) {
+  if (!isNotification && !isNotifications && !isReaction && !isEdit) {
     return json({ ok: false, error: "invalid Telegram action" }, 400);
+  }
+
+  if (isNotifications) {
+    const texts = payload.texts.map((text) => String(text || "").trim()).filter(Boolean);
+    if (!texts.length) return json({ ok: false, error: "empty notification batch" }, 400);
+    for (const text of texts) {
+      const response = await telegramApiRequest(env, "sendMessage", {
+        chat_id: String(payload.chat_id), text: text.slice(0, 3900), parse_mode: "HTML", disable_web_page_preview: true,
+      });
+      if (!response.ok) return response;
+    }
+    return json({ ok: true, sent: texts.length });
   }
 
   const method = isReaction ? "setMessageReaction" : (isEdit ? "editMessageText" : "sendMessage");
@@ -84,17 +97,16 @@ async function sendTelegramAction(request, env) {
         ...(payload.reply_markup ? { reply_markup: payload.reply_markup } : {}),
       };
 
+  return telegramApiRequest(env, method, body);
+}
+
+async function telegramApiRequest(env, method, body) {
   try {
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     const responseBody = await response.text();
-    return new Response(responseBody, {
-      status: response.status,
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-    });
+    return new Response(responseBody, { status: response.status, headers: { "Content-Type": "application/json; charset=utf-8" } });
   } catch (error) {
     return json({ ok: false, error: "Telegram relay failed" }, 502);
   }

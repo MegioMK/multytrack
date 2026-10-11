@@ -16,7 +16,9 @@ var TASK_TRACKER_CONFIG_ = {
   morningHour: 8,
   eveningPlanHour: 20,
   weeklyReflectionHour: 12,
-  draftWaitMinutes: 2
+  draftWaitMinutes: 2,
+  // Optional Cloudflare fallback for scheduled notifications only.
+  notificationRelayUrl: ''
 };
 
 var WORK_STATUSES_ = ['new', 'planned', 'in_progress', 'blocked', 'done', 'cancelled', 'skipped'];
@@ -1192,16 +1194,44 @@ function requestYandexNotifications_(texts) {
   if (!functionUrl || !relaySecret) {
     throw new Error('Напоминания не настроены: отсутствуют Script Properties Yandex Function.');
   }
-  var response = UrlFetchApp.fetch(functionUrl, {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'X-Relay-Secret': relaySecret },
-    payload: JSON.stringify({ mode: 'send_notifications', texts: messages }),
-    muteHttpExceptions: true
-  });
-  if (response.getResponseCode() >= 300) {
-    throw new Error('Yandex Function не приняла уведомление: ' + response.getContentText());
+  try {
+    var response = UrlFetchApp.fetch(functionUrl, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'X-Relay-Secret': relaySecret },
+      payload: JSON.stringify({ mode: 'send_notifications', texts: messages }),
+      muteHttpExceptions: true
+    });
+    if (response.getResponseCode() < 300) return;
+    throw new Error('HTTP ' + response.getResponseCode() + ': ' + response.getContentText());
+  } catch (error) {
+    sendNotificationsViaRelay_(messages, relaySecret, error);
   }
+}
+
+function sendNotificationsViaRelay_(messages, relaySecret, yandexError) {
+  var relayUrl = PropertiesService.getScriptProperties().getProperty('NOTIFICATION_RELAY_URL') || TASK_TRACKER_CONFIG_.notificationRelayUrl;
+  var chatId = getNotificationChatId_();
+  if (!relayUrl || !chatId) throw new Error('Yandex Function недоступна (' + yandexError + '), резервный канал не настроен.');
+  var response = UrlFetchApp.fetch(relayUrl, {
+    method: 'post', contentType: 'application/json', headers: { 'X-Relay-Secret': relaySecret },
+    payload: JSON.stringify({ mode: 'send_notifications', chat_id: chatId, texts: messages }), muteHttpExceptions: true
+  });
+  if (response.getResponseCode() >= 300) throw new Error('Не сработали ни Yandex Function (' + yandexError + '), ни резервный relay: ' + response.getContentText());
+}
+
+function getNotificationChatId_() {
+  var configured = PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID');
+  if (configured) return configured;
+  var sheet = getTrackerSpreadsheet_().getSheetByName(TASK_TRACKER_CONFIG_.incomingSheet);
+  if (!sheet || !hasDataRows_(sheet)) return '';
+  var chatIdColumn = columnNumberOrZero_(getHeaders_(sheet), 'Telegram chat_id');
+  if (!chatIdColumn) return '';
+  var values = sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, chatIdColumn, dataRowCount_(sheet), 1).getDisplayValues();
+  for (var index = values.length - 1; index >= 0; index -= 1) {
+    if (String(values[index][0] || '').trim()) return String(values[index][0]).trim();
+  }
+  return '';
 }
 
 function requestYandexWeeklyReflection_(weekStart, cutoffKey) {

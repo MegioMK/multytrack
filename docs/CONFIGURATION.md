@@ -15,6 +15,7 @@ Apps Script Script Properties:
 | --- | --- |
 | `YANDEX_FUNCTION_URL` | URL Yandex Function для служебных запросов к боту. |
 | `RELAY_SECRET` | Общий секрет Apps Script, Function и Worker. |
+| `NOTIFICATION_RELAY_URL` | Необязательный URL Cloudflare Worker для fallback плановых уведомлений. |
 | `SPREADSHEET_ID` | Необязателен для привязанного Apps Script. |
 
 ## 2. Google service account
@@ -48,6 +49,8 @@ JSON-ключ нельзя класть в файл проекта, в табл�
 3. Добавьте Worker secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `RELAY_SECRET`.
 4. Разверните Worker.
 5. Вызовите Telegram `setWebhook` с URL Worker и `secret_token`, совпадающим с `TELEGRAM_WEBHOOK_SECRET`.
+
+Плановые уведомления сначала идут через Yandex Function. Если её URL временно недоступен, Apps Script отправляет пакет через Worker напрямую в Telegram. Для fallback укажите `NOTIFICATION_RELAY_URL` в Script Properties или `notificationRelayUrl` в локальной конфигурации Apps Script.
 
 ## Проверка доступов
 
