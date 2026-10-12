@@ -240,6 +240,7 @@ function promoteReadyIncoming_(forceDraftPromotion) {
   if (!hasDataRows_(sheet)) {
     return 0;
   }
+  ensureIncomingIds_(sheet, headers);
   var rows = sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(sheet), headers.length).getValues();
   var promoted = 0;
   rows.forEach(function(row, index) {
@@ -501,6 +502,7 @@ function appendIncomingNote_(notes, incomingId) {
 function markIncomingDraftChanged_(rowNumber) {
   var sheet = getTrackerSpreadsheet_().getSheetByName(TASK_TRACKER_CONFIG_.incomingSheet);
   var headers = getHeaders_(sheet);
+  ensureIncomingIds_(sheet, headers);
   var item = rowToObject_(headers, sheet.getRange(rowNumber, 1, 1, headers.length).getValues()[0]);
   if (item.ID && String(item['Формулировка задачи'] || '').trim()) {
     PropertiesService.getScriptProperties().setProperty(draftStateKey_(item.ID), JSON.stringify({
@@ -559,6 +561,29 @@ function isDraftReadyForPromotion_(incoming) {
     return false;
   }
   return Date.now() - Number(state.changedAt || 0) >= TASK_TRACKER_CONFIG_.draftWaitMinutes * 60 * 1000;
+}
+
+// Ручные входящие тоже нуждаются в ID: иначе их черновики делят один таймер.
+function ensureIncomingIds_(sheet, headers) {
+  if (!hasDataRows_(sheet)) {
+    return;
+  }
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var rows = sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, 1, dataRowCount_(sheet), headers.length).getValues();
+    rows.forEach(function(row, index) {
+      var item = rowToObject_(headers, row);
+      if (!String(item.ID || '').trim() &&
+          (String(item['Исходный текст'] || '').trim() || String(item['Формулировка задачи'] || '').trim())) {
+        sheet.getRange(index + TASK_TRACKER_CONFIG_.dataStartRow, columnNumber_(headers, 'ID'))
+          .setValue('manual_' + Utilities.getUuid());
+      }
+    });
+    SpreadsheetApp.flush();
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function draftStateKey_(incomingId) {
@@ -1282,6 +1307,7 @@ function ensureTaskTrackerSchema_() {
   ensureSubtaskCheckColumn_(subtasksSheet);
   var shoppingSheet = ensureShoppingSheet_(spreadsheet);
   ensurePlanDayShoppingSection_(spreadsheet, shoppingSheet, subtasksSheet);
+  ensurePlanDashboard_(spreadsheet, subtasksSheet);
   var routinesSheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.routinesSheet);
   ensureRoutineColumns_(routinesSheet);
   var eventsSheet = ensureImportantEventsSheet_(spreadsheet);
@@ -1318,19 +1344,13 @@ function ensureSummarySheets_(spreadsheet) {
     { sheet: summaries, headers: dailyHeaders },
     { sheet: weekly, headers: weeklyHeaders }
   ].forEach(function(item) {
-    item.sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, item.headers.length).setValues([item.headers]);
-    item.sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, item.headers.length).setFontWeight('bold').setBackground('#e6e6e6');
-    item.sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
+    ensureSheetColumns_(item.sheet, item.headers, item.sheet === weekly ? weeklyHeaders.slice(2, 11) : []);
   });
-  // Рефлексию недели пользователь пишет сам; отделяем ее цветом от автоматических полей.
-  weekly.getRange(TASK_TRACKER_CONFIG_.headerRow, 3, 1, 9).setBackground('#fbc965');
 }
 
 function migrateWeeklyReflectionLayout_(sheet, newHeaders) {
   var oldHeaders = getHeaders_(sheet);
-  var matches = oldHeaders.length === newHeaders.length && oldHeaders.every(function(header, index) {
-    return header === newHeaders[index];
-  });
+  var matches = newHeaders.every(function(header) { return oldHeaders.indexOf(header) !== -1; });
   if (matches) {
     return;
   }
@@ -1817,23 +1837,13 @@ function ensureShoppingSheet_(spreadsheet) {
     sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
   }
   var headers = ['ID', 'Покупка', 'Статус', 'Источник', 'Ссылка на входящее', 'Создано', 'Обновлено', 'Заметки', 'Дата закрытия'];
-  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length).setValues([headers]);
-  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length)
-    .setFontWeight('bold')
-    .setBackground('#e6e6e6');
-  // Оранжевый фон отмечает поля, которые пользователь заполняет вручную.
-  [2, 3, 8].forEach(function(column) {
-    sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, column).setBackground('#fbc965');
-  });
-  sheet.setColumnWidth(1, 150);
-  sheet.setColumnWidth(2, 280);
-  sheet.setColumnWidth(3, 140);
-  sheet.setColumnWidth(8, 280);
+  ensureSheetColumns_(sheet, headers, ['Покупка', 'Статус', 'Заметки']);
   return sheet;
 }
 
 function ensureImportantEventsSheet_(spreadsheet) {
   var sheet = spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.eventsSheet);
+  var isNewSheet = !sheet;
   if (!sheet) {
     sheet = spreadsheet.insertSheet(TASK_TRACKER_CONFIG_.eventsSheet);
     sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
@@ -1842,20 +1852,28 @@ function ensureImportantEventsSheet_(spreadsheet) {
     'ID', 'Событие', 'Дата события', 'Повторение', 'Статус',
     'Делать подарок', 'За сколько дней купить подарок',
     'Готовить мероприятие', 'За сколько дней подготовить мероприятие',
-    'Оценка подарка, мин', 'Оценка подготовки, мин', 'Заметки', 'Обновлено'
+    'Оценка подарка, мин', 'Оценка подготовки, мин', 'Заметки', 'Обновлено', 'Исходная дата'
   ];
+  if (!isNewSheet) {
+    headers.forEach(function(header) { ensureColumn_(sheet, header); });
+    return sheet;
+  }
   sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length).setValues([headers]);
   sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 1, 1, headers.length).setFontWeight('bold').setBackground('#e6e6e6');
-  [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].forEach(function(column) {
+  [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14].forEach(function(column) {
     sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, column).setBackground('#fbc965');
   });
   sheet.setFrozenRows(TASK_TRACKER_CONFIG_.headerRow);
-  sheet.setColumnWidth(1, 190);
-  sheet.setColumnWidth(2, 280);
-  sheet.setColumnWidth(3, 120);
-  sheet.setColumnWidth(7, 180);
-  sheet.setColumnWidth(9, 230);
-  sheet.setColumnWidth(12, 280);
+  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, 14).setNote('Настоящая дата рождения, кончины или другого события, включая исходный год. Скрипт ее не меняет. Для ежегодного события по ней рассчитывается ближайшая Дата события.');
+  if (isNewSheet) {
+    sheet.setColumnWidth(1, 190);
+    sheet.setColumnWidth(2, 280);
+    sheet.setColumnWidth(3, 120);
+    sheet.setColumnWidth(7, 180);
+    sheet.setColumnWidth(9, 230);
+    sheet.setColumnWidth(12, 280);
+    sheet.setColumnWidth(14, 140);
+  }
   return sheet;
 }
 
@@ -1953,7 +1971,6 @@ function ensureSubtaskTaskTitleColumn_(sheet) {
 // Проект подзадачи всегда наследуется от основной задачи, а не заполняется вручную.
 function ensureSubtaskProjectColumn_(sheet) {
   ensureColumn_(sheet, 'Проект / область');
-  sheet.setColumnWidth(columnNumber_(getHeaders_(sheet), 'Проект / область'), 180);
 }
 
 function ensurePlanDayProjectColumn_(planSheet, subtasksSheet, firstRow, rows) {
@@ -2016,10 +2033,20 @@ function ensureRoutineColumns_(sheet) {
   ensureColumn_(sheet, 'Оценка, мин');
   ensureColumn_(sheet, 'Текущая подзадача ID');
   ensureColumn_(sheet, 'Пауза до');
-  var updatedHeaders = getHeaders_(sheet);
-  // Дата паузы — ручное правило, не служебное поле автоматики.
-  sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, columnNumber_(updatedHeaders, 'Пауза до'))
-    .setBackground('#fbc965');
+}
+
+// Существующие заголовки и оформление принадлежат пользователю: этот помощник
+// добавляет только отсутствующие поля и не меняет порядок или форматирование.
+function ensureSheetColumns_(sheet, requiredHeaders, manualHeaders) {
+  var existing = getHeaders_(sheet);
+  requiredHeaders.forEach(function(header) {
+    if (existing.indexOf(header) !== -1) return;
+    ensureColumn_(sheet, header);
+    var column = columnNumber_(getHeaders_(sheet), header);
+    sheet.getRange(TASK_TRACKER_CONFIG_.headerRow, column)
+      .setFontWeight('bold')
+      .setBackground(manualHeaders.indexOf(header) !== -1 ? '#fbc965' : '#e6e6e6');
+  });
 }
 
 function ensureColumn_(sheet, header) {
@@ -2444,7 +2471,19 @@ function syncImportantEventOccurrences_() {
       if (event['За сколько дней подготовить мероприятие'] === '') { updates['За сколько дней подготовить мероприятие'] = 7; event['За сколько дней подготовить мероприятие'] = 7; }
       if (event['Оценка подарка, мин'] === '') { updates['Оценка подарка, мин'] = 30; event['Оценка подарка, мин'] = 30; }
       if (event['Оценка подготовки, мин'] === '') { updates['Оценка подготовки, мин'] = 60; event['Оценка подготовки, мин'] = 60; }
+      var originalDate = routineDate_(event['Исходная дата']);
       var eventDate = routineDate_(event['Дата события']);
+      if (originalDate) {
+        var nextDate = nextImportantEventDate_(originalDate, event.Повторение, today);
+        if (!eventDate || eventDate.getTime() !== nextDate.getTime()) {
+          if (eventDate && eventDate.getTime() < today.getTime()) {
+            closeExpiredEventSubtasks_(subtasksSheet, subtaskHeaders, subtasks, String(event.ID), routineDateKey_(eventDate));
+          }
+          eventDate = nextDate;
+          updates['Дата события'] = eventDate;
+          event['Дата события'] = eventDate;
+        }
+      }
       if (!eventDate || String(event.Статус).toLowerCase() !== 'active') {
         if (Object.keys(updates).length) { updates.Обновлено = nowIso_(); setObjectFields_(eventsSheet, eventHeaders, rowNumber, updates); }
         return;
@@ -2473,6 +2512,24 @@ function syncImportantEventOccurrences_() {
     });
     if (additions.length) subtasksSheet.getRange(nextDataRow_(subtasksSheet), 1, additions.length, subtaskHeaders.length).setValues(additions);
   } finally { lock.releaseLock(); }
+}
+
+function nextImportantEventDate_(originalDate, repeat, today) {
+  if (String(repeat).toLowerCase() !== 'ежегодно') {
+    return startOfDay_(originalDate);
+  }
+  var year = Math.max(today.getFullYear(), originalDate.getFullYear());
+  var date = importantEventDateInYear_(originalDate, year);
+  if (date.getTime() < today.getTime()) {
+    date = importantEventDateInYear_(originalDate, year + 1);
+  }
+  return date;
+}
+
+function importantEventDateInYear_(originalDate, year) {
+  var month = originalDate.getMonth();
+  var day = Math.min(originalDate.getDate(), new Date(year, month + 1, 0).getDate());
+  return new Date(year, month, day);
 }
 
 function eventSubtaskDefinitions_(event, eventDate) {
@@ -2800,6 +2857,85 @@ function extractDeadline_(text) {
 
 function nowIso_() {
   return new Date().toISOString();
+}
+
+// Override the legacy positional Plan builder. Every reference is resolved by
+// header, so users may move whole columns without breaking the generated view.
+function ensurePlanDayShoppingSection_(spreadsheet, shoppingSheet, subtasksSheet) {
+  var sheet = spreadsheet.getSheetByName('План дня');
+  var planHeaders = ['Раздел', 'Закрыть', 'Подзадача', 'Задача', 'Проект / область', 'Тип', 'Статус', 'Дата', 'Оценка, мин', 'Дедлайн', 'Заметки', 'ID подзадачи'];
+  ensureSheetColumns_(sheet, planHeaders, []);
+  var headers = getHeaders_(sheet);
+  var formulas = buildPlanColumnFormulas_(sheet, subtasksSheet, shoppingSheet, spreadsheet.getSheetByName(TASK_TRACKER_CONFIG_.tasksSheet));
+  var changes = planHeaders.filter(function(header) {
+    return sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, columnNumber_(headers, header)).getFormula() !== formulas[header];
+  });
+  changes.forEach(function(header) {
+    sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, columnNumber_(headers, header), sheet.getMaxRows() - TASK_TRACKER_CONFIG_.headerRow, 1).clearContent();
+  });
+  changes.forEach(function(header) {
+    sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, columnNumber_(headers, header)).setFormula(formulas[header]);
+  });
+}
+
+function sheetColumnRange_(sheet, header, firstRow) {
+  var column = columnLetter_(columnNumber_(getHeaders_(sheet), header));
+  return "'" + sheet.getName().replace(/'/g, "''") + "'!$" + column + '$' + (firstRow || TASK_TRACKER_CONFIG_.dataStartRow) + ':$' + column;
+}
+
+function buildPlanColumnFormulas_(planSheet, subtasksSheet, shoppingSheet, tasksSheet) {
+  var sub = function(header) { return sheetColumnRange_(subtasksSheet, header); };
+  var shop = function(header) { return sheetColumnRange_(shoppingSheet, header); };
+  var blank = 'IF(sub_ids<>"";"";"")';
+  var shoppingBlank = 'IF(shop_ids<>"";"";"")';
+  var fields = {
+    'Раздел': [blank, shoppingBlank], 'Подзадача': [sub('Название'), shop('Покупка')],
+    'Задача': [sub('Задача'), shoppingBlank], 'Проект / область': [sub('Проект / область'), shoppingBlank],
+    'Тип': ['IF(REGEXMATCH(' + sub('Источник ID') + ';"^routine_");"Рутина";IF(REGEXMATCH(' + sub('Источник ID') + ';"^event_");"Событие";"Подзадача"))', 'IF(shop_ids<>"";"Покупка";"")'],
+    'Статус': ['sub_status', 'shop_status'], 'Дата': ['sub_dates', shoppingBlank],
+    'Оценка, мин': [sub('Оценка, мин'), shoppingBlank],
+    'Дедлайн': ['IFERROR(VLOOKUP(' + sub('Источник ID') + ';{' + sheetColumnRange_(tasksSheet, 'ID') + '\\' + sheetColumnRange_(tasksSheet, 'Дедлайн') + '};2;FALSE);"")', shoppingBlank],
+    'Заметки': [sub('Заметки'), shop('Заметки')], 'ID подзадачи': ['sub_ids', 'shop_ids']
+  };
+  var formulas = {};
+  Object.keys(fields).forEach(function(header) {
+    var sections = [['Просрочено', 'sub_dates<TODAY()'], ['Сегодня', 'sub_dates=TODAY()'], ['Завтра', 'sub_dates=TODAY()+1'], ['Послезавтра', 'sub_dates=TODAY()+2']];
+    var blocks = [];
+    sections.forEach(function(section) {
+      blocks.push(header === 'Раздел' ? '"' + section[0] + '"' : '""');
+      blocks.push('IFERROR(CHOOSECOLS(SORT(FILTER({sub_dates\\sub_ids\\' + fields[header][0] + '};sub_ids<>"";sub_dates<>"";sub_status<>"done";sub_status<>"cancelled";sub_status<>"skipped";' + section[1] + ');1;TRUE;2;TRUE);3);"")');
+    });
+    blocks.push(header === 'Раздел' ? '"🛒 Покупки"' : '""');
+    blocks.push('IFERROR(FILTER(' + fields[header][1] + ';shop_ids<>"";shop_status="new");"")');
+    formulas[header] = '=ARRAYFORMULA(LET(sub_ids;' + sub('ID') + ';sub_dates;' + sub('Дата') + ';sub_status;' + sub('Статус') + ';shop_ids;' + shop('ID') + ';shop_status;' + shop('Статус') + ';VSTACK(' + blocks.join(';') + ')))';
+  });
+  var ids = sheetColumnRange_(planSheet, 'ID подзадачи');
+  var types = sheetColumnRange_(planSheet, 'Тип');
+  var url = function(sheet) {
+    var status = columnLetter_(columnNumber_(getHeaders_(sheet), 'Статус'));
+    return '"#gid=' + sheet.getSheetId() + '&range=' + status + '"&MATCH(' + ids + ';' + sheetColumnRange_(sheet, 'ID', 1) + ';0)';
+  };
+  formulas['Закрыть'] = '=ARRAYFORMULA(IF(' + ids + '="";"";IFERROR(IF(' + types + '="Покупка";HYPERLINK(' + url(shoppingSheet) + ';"Купить");HYPERLINK(' + url(subtasksSheet) + ';"Закрыть"));"")))';
+  return formulas;
+}
+
+function ensurePlanDashboard_(spreadsheet, subtasksSheet) {
+  var sheet = spreadsheet.getSheetByName('План дня');
+  var labels = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+  var find = function(label) { return labels.indexOf(label) + 1; };
+  var limit = find('Лимит дня, ч'), load = find('Нагрузка'), count = find('Подзадач на сегодня'), minutes = find('Запланировано на сегодня, ч');
+  if (!limit || !load || !count || !minutes) return;
+  var sub = function(header) { return sheetColumnRange_(subtasksSheet, header); };
+  var id = sub('ID'), status = sub('Статус'), date = sub('Дата'), estimate = sub('Оценка, мин');
+  var open = id + ';"<>";' + date + ';TODAY();' + status + ';"<>done";' + status + ';"<>cancelled";' + status + ';"<>skipped"';
+  setFormulaIfChanged_(sheet, 2, count, '=COUNTIFS(' + open + ')');
+  setFormulaIfChanged_(sheet, 2, minutes, '=SUMIFS(' + estimate + ';' + date + ';TODAY();' + status + ';"<>done";' + status + ';"<>cancelled";' + status + ';"<>skipped")/60');
+  setFormulaIfChanged_(sheet, 2, load, '=IF(' + columnLetter_(minutes) + '2>' + columnLetter_(limit) + '2;"ПЕРЕЛИМИТ";"в лимите")');
+}
+
+function setFormulaIfChanged_(sheet, row, column, formula) {
+  var range = sheet.getRange(row, column);
+  if (range.getFormula() !== formula) range.setFormula(formula);
 }
 
 function trackerUrl_() {
