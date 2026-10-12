@@ -1319,21 +1319,12 @@ function ensureTaskTrackerSchema_() {
   ensureSummarySheets_(spreadsheet);
   migrateStatusModel_(spreadsheet, incomingSheet, tasksSheet, subtasksSheet, routinesSheet, shoppingSheet);
   var referencesSheet = ensureReferencesSheet_(spreadsheet, incomingSheet, tasksSheet, routinesSheet);
-  applyReferenceValidation_(incomingSheet, 'Статус разбора', referencesSheet, 'Статусы работы');
-  applyReferenceValidation_(incomingSheet, 'Предложенный тип', referencesSheet, 'Типы');
-  applyReferenceValidation_(shoppingSheet, 'Статус', referencesSheet, 'Статусы работы');
-  applyReferenceValidation_(tasksSheet, 'Статус', referencesSheet, 'Статусы работы');
-  applyReferenceValidation_(tasksSheet, 'Приоритет', referencesSheet, 'Приоритеты');
-  applyReferenceValidation_(tasksSheet, 'Проект / область', referencesSheet, 'Проекты / области');
-  applyReferenceValidation_(subtasksSheet, 'Статус', referencesSheet, 'Статусы работы');
-  applyReferenceValidation_(subtasksSheet, 'Приоритет', referencesSheet, 'Приоритеты');
-  applyReferenceValidation_(routinesSheet, 'Статус', referencesSheet, 'Статусы рутин');
-  applyReferenceValidation_(routinesSheet, 'Повторение', referencesSheet, 'Повторение');
-  applyReferenceValidation_(routinesSheet, 'Категория', referencesSheet, 'Категории рутин');
-  applyReferenceValidation_(eventsSheet, 'Статус', referencesSheet, 'Статусы событий');
-  applyReferenceValidation_(eventsSheet, 'Повторение', referencesSheet, 'Повторение событий');
-  applyReferenceValidation_(eventsSheet, 'Делать подарок', referencesSheet, 'Да / нет');
-  applyReferenceValidation_(eventsSheet, 'Готовить мероприятие', referencesSheet, 'Да / нет');
+  reconcileReferenceValidations_(incomingSheet, referencesSheet, { 'Статус разбора': 'Статусы работы', 'Предложенный тип': 'Типы' });
+  reconcileReferenceValidations_(shoppingSheet, referencesSheet, { Статус: 'Статусы работы' });
+  reconcileReferenceValidations_(tasksSheet, referencesSheet, { Статус: 'Статусы работы', Приоритет: 'Приоритеты', 'Проект / область': 'Проекты / области' });
+  reconcileReferenceValidations_(subtasksSheet, referencesSheet, { Статус: 'Статусы работы', Приоритет: 'Приоритеты' });
+  reconcileReferenceValidations_(routinesSheet, referencesSheet, { Статус: 'Статусы рутин', Повторение: 'Повторение', Категория: 'Категории рутин' });
+  reconcileReferenceValidations_(eventsSheet, referencesSheet, { Статус: 'Статусы событий', Повторение: 'Повторение событий', 'Делать подарок': 'Да / нет', 'Готовить мероприятие': 'Да / нет' });
 }
 
 function ensureSummarySheets_(spreadsheet) {
@@ -2671,6 +2662,29 @@ function applyReferenceValidation_(sheet, header, referencesSheet, referenceHead
     .setAllowInvalid(false)
     .build();
   range.setDataValidation(rule);
+}
+
+// System dropdowns follow header names, not physical column positions.
+// Only validations sourced from the References sheet are reconciled here.
+function reconcileReferenceValidations_(sheet, referencesSheet, rulesByHeader) {
+  var headers = getHeaders_(sheet);
+  var referenceHeaders = getHeaders_(referencesSheet);
+  var rows = Math.max(sheet.getMaxRows() - TASK_TRACKER_CONFIG_.headerRow, 1);
+  headers.forEach(function(header, index) {
+    var range = sheet.getRange(TASK_TRACKER_CONFIG_.dataStartRow, index + 1, rows, 1);
+    var rule = range.getCell(1, 1).getDataValidation();
+    if (!rule || rule.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.VALUE_IN_RANGE) return;
+    var sourceRange = rule.getCriteriaValues()[0];
+    if (sourceRange.getSheet().getSheetId() !== referencesSheet.getSheetId()) return;
+    var expected = rulesByHeader[header];
+    var expectedColumn = expected ? columnNumberOrZero_(referenceHeaders, expected) : 0;
+    if (!expectedColumn || sourceRange.getColumn() !== expectedColumn) range.clearDataValidations();
+  });
+  Object.keys(rulesByHeader).forEach(function(header) {
+    if (columnNumberOrZero_(headers, header)) {
+      applyReferenceValidation_(sheet, header, referencesSheet, rulesByHeader[header]);
+    }
+  });
 }
 
 function deleteAutomationTriggers_() {
