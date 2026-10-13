@@ -40,49 +40,17 @@ SHEET_SCHEMAS: dict[str, list[str]] = {
         "Заметки",
     ],
     "Задачи": [
-        "ID",
-        "Заголовок",
-        "Тип",
-        "Проект / область",
-        "Родительский ID",
-        "Статус",
-        "Приоритет",
-        "Дедлайн",
-        "Дата планирования",
-        "Следующий шаг",
-        "Источник",
-        "Ссылка на входящее",
-        "Создано",
-        "Обновлено",
-        "Заметки",
+        "ID", "Заголовок", "Проект / область", "Статус", "Приоритет",
+        "Дедлайн", "Источник", "Ссылка на входящее", "Создано", "Обновлено", "Заметки", "Дата закрытия",
     ],
     "Подзадачи": [
-        "ID",
-        "Задача ID",
-        "Название",
-        "Статус",
-        "Дедлайн",
-        "Дата планирования",
-        "Оценка времени, мин",
-        "Тип мышления",
-        "Готовность",
-        "Недельный исход",
-        "Порядок",
-        "Обновлено",
-        "Заметки",
+        "ID", "Задача", "Источник ID", "Название", "Статус", "Дата", "Оценка, мин",
+        "Тип мышления", "Готовность", "Недельный исход", "Порядок", "Обновлено", "Заметки",
+        "Проверка планирования", "Проект / область", "Дата закрытия", "Приоритет",
     ],
     "План дня": [
-        "ID",
-        "Дата",
-        "Начало",
-        "Конец",
-        "Тип слота",
-        "Задача ID",
-        "Подзадача ID",
-        "Название",
-        "Статус",
-        "Источник",
-        "Заметки",
+        "Раздел", "Закрыть", "Подзадача", "Задача", "Проект / область", "Приоритет", "Тип", "Статус",
+        "Дата", "Оценка, мин", "Дедлайн", "Заметки", "ID подзадачи",
     ],
     "Входящие": [
         "ID",
@@ -97,8 +65,9 @@ SHEET_SCHEMAS: dict[str, list[str]] = {
         "Срочность",
         "Формулировка задачи",
         "Статус разбора",
-        "Созданная задача ID",
+        "Созданные задачи ID",
         "Заметки",
+        "Созданные покупки ID",
     ],
     "Рутины": [
         "ID",
@@ -346,8 +315,7 @@ def capture_incoming(
 
 
 def _incoming_entry_exists(entry_id: str) -> bool:
-    rows = sheets_get_values("Входящие", "A12:A2000")
-    return any(row and str(row[0]).strip() == entry_id for row in rows)
+    return any(row.get("ID") == entry_id for row in _sheet_rows_with_numbers("Входящие", "A11:Z2000"))
 
 
 def _incoming_confirmation(suggested_type: str) -> str:
@@ -362,7 +330,7 @@ def _incoming_confirmation(suggested_type: str) -> str:
 
 def _new_incoming_count() -> int:
     # В первых десяти строках расположен дашборд, а шапка списка - в строке 11.
-    values = sheets_get_values("Входящие", "A11:N1000")
+    values = sheets_read_table_values("Входящие", 2000)
     if not values:
         return 0
     headers = values[0]
@@ -374,6 +342,8 @@ def _new_incoming_count() -> int:
     return sum(
         len(row) > status_index
         and str(row[status_index]).strip().lower() == "new"
+        # Покупки создаются автоматически и не требуют ручного разбора. Пока
+        # Apps Script завершает их перенос, они не должны раскачивать счетчик.
         and (len(row) <= type_index or str(row[type_index]).strip().lower() != "покупка")
         for row in values[1:]
     )
@@ -398,7 +368,7 @@ def _suggest_incoming_type(text: str) -> str:
 
 
 def promote_ready_incoming() -> int:
-    values = sheets_get_values("Входящие", "A1:Z500")
+    values = sheets_read_table_values("Входящие", 2000)
     if len(values) < 2:
         return 0
     headers = values[0]
@@ -407,7 +377,7 @@ def promote_ready_incoming() -> int:
     promoted = 0
     terminal_statuses = {"done", "cancelled", "skipped"}
 
-    for row_index, raw_row in enumerate(values[1:], start=2):
+    for row_index, raw_row in enumerate(values[1:], start=12):
         row = raw_row + [""] * (len(headers) - len(raw_row))
         item = {headers[index]: str(row[index]).strip() for index in range(len(headers))}
         title = item.get("Формулировка задачи", "")
@@ -419,28 +389,18 @@ def promote_ready_incoming() -> int:
         source = item.get("Источник") or "Ручной ввод"
         project = item.get("Подсказка проекта") or _project_hint(title)
         deadline = _extract_deadline(title) or _extract_deadline(item.get("Исходный текст", ""))
-        priority = "высокий" if item.get("Срочность") else "обычный"
+        priority = ""
         now = _now().isoformat(timespec="seconds")
         if task_id not in existing_task_ids:
-            sheets_append_values("Задачи", [[
-                task_id,
-                title,
-                "задача",
-                project,
-                "",
-                "new",
-                priority,
-                deadline,
-                "",
-                "",
-                source,
-                entry_id,
-                now,
-                now,
-                item.get("Заметки", ""),
-            ]])
+            sheets_append_objects("Задачи", [{
+                "ID": task_id, "Заголовок": title, "Проект / область": project,
+                "Статус": "new", "Приоритет": priority, "Дедлайн": deadline,
+                "Источник": source, "Ссылка на входящее": entry_id,
+                "Создано": now, "Обновлено": now, "Заметки": item.get("Заметки", ""),
+            }])
             existing_task_ids.add(task_id)
-        sheets_update_values("Входящие", f"L{row_index}:M{row_index}", [["done", task_id]])
+        sheets_update_value_by_header("Входящие", row_index, "Созданные задачи ID", task_id)
+        sheets_update_value_by_header("Входящие", row_index, "Статус разбора", "done")
         promoted += 1
     return promoted
 
@@ -535,7 +495,7 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "")
     for item in _sheet_rows_with_numbers("Подзадачи", "A11:O1000"):
         status = item.get("Статус", "").lower()
         due = _parse_date(item.get("Дата", ""))
-        if not item.get("ID") or status in {"done", "cancelled", "skipped"} or not due:
+        if not item.get("ID") or status in {"idea", "done", "cancelled", "skipped"} or not due:
             continue
         if mode == "today" and due == today:
             selected.append(item)
@@ -660,8 +620,8 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
             return _telegram_callback_reply(callback_id, "Покупка изменилась. Обновите список.", show_alert=True)
         if item.get("Статус", "").lower() in {"done", "cancelled", "skipped"}:
             return _telegram_callback_reply(callback_id, "Уже отмечена.")
-        sheets_update_values("Список покупок", f"C{row_number}:C{row_number}", [["done"]])
-        sheets_update_values("Список покупок", f"G{row_number}:G{row_number}", [[_now().isoformat(timespec="seconds")]])
+        sheets_update_value_by_header("Список покупок", row_number, "Статус", "done")
+        sheets_update_value_by_header("Список покупок", row_number, "Обновлено", _now().isoformat(timespec="seconds"))
         sheets_update_value_by_header("Список покупок", row_number, "Дата закрытия", _now().isoformat(timespec="seconds"))
         title = str(item.get("Покупка") or "Покупка")
         digest = build_actionable_shopping_digest(page, f"✅ Куплено: <b>{escape(title)}</b>. Список обновлён.")
@@ -690,7 +650,7 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
         title = str(item.get("Название") or item.get("Задача") or "Подзадача")
         now = _now().isoformat(timespec="seconds")
         if action == "done":
-            sheets_update_values("Подзадачи", f"E{row_number}:E{row_number}", [["done"]])
+            sheets_update_value_by_header("Подзадачи", row_number, "Статус", "done")
             sheets_update_value_by_header("Подзадачи", row_number, "Дата закрытия", now)
             notice = f"✅ Готово: <b>{escape(title)}</b>. Список обновлён."
             callback_text = "Готово, обновил."
@@ -699,7 +659,7 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
             routine = _routine_by_id(str(item.get("Источник ID") or ""))
             if routine and str(routine.get("Повторение") or "").strip().lower() == "ежедневно":
                 return _telegram_callback_reply(callback_id, "Ежедневную рутину лучше пропустить: завтра появится новый экземпляр.", show_alert=True)
-            sheets_update_values("Подзадачи", f"F{row_number}:F{row_number}", [[tomorrow]])
+            sheets_update_value_by_header("Подзадачи", row_number, "Дата", tomorrow)
             if routine:
                 sheets_update_value_by_header("Рутины", int(routine["__row_number"]), "Следующая дата", tomorrow)
             notice = f"↪️ На завтра: <b>{escape(title)}</b>. Список обновлён."
@@ -707,10 +667,10 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
         else:
             if not str(item.get("Источник ID") or "").startswith("routine_"):
                 return _telegram_callback_reply(callback_id, "Пропустить можно только рутину.", show_alert=True)
-            sheets_update_values("Подзадачи", f"E{row_number}:E{row_number}", [["skipped"]])
+            sheets_update_value_by_header("Подзадачи", row_number, "Статус", "skipped")
             notice = f"⏭ Пропущено: <b>{escape(title)}</b>. Следующий повтор появится по расписанию."
             callback_text = "Пропуск записан."
-        sheets_update_values("Подзадачи", f"L{row_number}:L{row_number}", [[now]])
+        sheets_update_value_by_header("Подзадачи", row_number, "Обновлено", now)
         digest = build_actionable_subtasks_digest(mode, page, notice)
         edit_telegram_message(
             str(message["chat"]["id"]),
@@ -729,8 +689,8 @@ def handle_callback_query(callback: dict[str, Any]) -> dict[str, Any]:
         return _telegram_callback_reply(callback_id, "Подзадача изменилась. Обновите список.", show_alert=True)
     if item.get("Статус", "").lower() in {"done", "cancelled", "skipped"}:
         return _telegram_callback_reply(callback_id, "Уже закрыта.")
-    sheets_update_values("Подзадачи", f"E{row_number}:E{row_number}", [["done"]])
-    sheets_update_values("Подзадачи", f"L{row_number}:L{row_number}", [[_now().isoformat(timespec="seconds")]])
+    sheets_update_value_by_header("Подзадачи", row_number, "Статус", "done")
+    sheets_update_value_by_header("Подзадачи", row_number, "Обновлено", _now().isoformat(timespec="seconds"))
     sheets_update_value_by_header("Подзадачи", row_number, "Дата закрытия", _now().isoformat(timespec="seconds"))
     title = str(item.get("Название") or item.get("Задача") or "Подзадача")
     send_telegram_message(str(message["chat"]["id"]), f"✅ Обновил: <b>{escape(title)}</b>.")
@@ -861,20 +821,42 @@ def _set_weekly_reflection_state(state: dict[str, Any]) -> None:
 
 
 def _sheet_rows_with_numbers(sheet_name: str, range_a1: str) -> list[dict[str, str]]:
-    values = sheets_get_values(sheet_name, range_a1)
+    end_match = re.search(r":(?:[A-Z]+)?(\d+)$", range_a1)
+    end_row = int(end_match.group(1)) if end_match else 2000
+    values = sheets_read_table_values(sheet_name, end_row)
     if len(values) < 2:
         return []
     headers = [str(value).strip() for value in values[0]]
+    raw_values = sheets_get_unformatted_values(sheet_name, f"A11:{_column_letter(len(headers))}{end_row}")
     first_data_row = 12
     rows = []
     for offset, row in enumerate(values[1:]):
         padded = row + [""] * (len(headers) - len(row))
         if not any(str(cell).strip() for cell in padded):
             continue
-        item = {headers[index]: str(padded[index]).strip() for index in range(len(headers))}
+        raw_row = raw_values[offset + 1] if offset + 1 < len(raw_values) else []
+        item = {}
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+            raw = raw_row[index] if index < len(raw_row) else ""
+            item[header] = _sheet_cell_to_text(raw) if header in DATE_HEADERS else str(padded[index]).strip()
         item["__row_number"] = str(first_data_row + offset)
         rows.append(item)
     return rows
+
+
+DATE_HEADERS = {
+    "Дата", "Дата закрытия", "Дата захвата", "Дедлайн", "Исходная дата",
+    "Дата события", "Следующая дата", "Пауза до", "Последнее выполнение", "Обновлено",
+}
+
+
+def _sheet_cell_to_text(value: Any) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Google Sheets serial day zero is 1899-12-30.
+        return (date(1899, 12, 30) + timedelta(days=float(value))).isoformat()
+    return str(value).strip()
 
 
 def _subtask_by_row_number(row_number: int) -> dict[str, str] | None:
@@ -954,7 +936,7 @@ def build_today_digest() -> str:
     plan = _rows_as_dicts("План дня")
     pult = _rows_as_dicts("Пульт")
 
-    terminal_statuses = {"done", "cancelled", "закрыта", "закрыто", "неактуальна", "неактуально", "отменено", "архив"}
+    terminal_statuses = {"idea", "done", "cancelled", "закрыта", "закрыто", "неактуальна", "неактуально", "отменено", "архив"}
     planned_tasks = [
         row for row in tasks
         if row.get("Статус", "").lower() not in terminal_statuses
@@ -1013,7 +995,7 @@ def build_hot_digest() -> str:
     for row in tasks:
         status = row.get("Статус", "").lower()
         due_raw = row.get("Дедлайн", "")
-        if status in {"done", "cancelled", "закрыто", "отменено", "архив"} or not due_raw:
+        if status in {"idea", "done", "cancelled", "закрыто", "отменено", "архив"} or not due_raw:
             continue
         due = _parse_date(due_raw)
         if due and due <= threshold:
@@ -1126,21 +1108,13 @@ def ensure_workbook() -> None:
         existing = {sheet["properties"]["title"]: sheet["properties"]["sheetId"] for sheet in metadata.get("sheets", [])}
 
     for title, headers in SHEET_SCHEMAS.items():
-        current = sheets_get_values(title, "1:1")
+        current = sheets_get_values(title, "11:11")
         current_headers = current[0] if current else []
-        if title == "Входящие":
-            legacy_headers = [header for header in headers if header != "Формулировка задачи"]
-            if current_headers == legacy_headers:
-                legacy_values = sheets_get_values(title, "A1:M500")
-                migrated_values = [headers]
-                for row in legacy_values[1:]:
-                    padded = row + [""] * (len(legacy_headers) - len(row))
-                    migrated_values.append(padded[:10] + [""] + padded[10:])
-                sheets_update_values(title, f"A1:N{len(migrated_values)}", migrated_values)
-                current_headers = headers
-        if current_headers[: len(headers)] != headers:
-            sheets_update_values(title, "1:1", [headers])
-        _freeze_header(existing[title])
+        for header in headers:
+            if header not in current_headers:
+                column = _column_letter(len(current_headers) + 1)
+                sheets_update_values(title, f"{column}11", [[header]])
+                current_headers.append(header)
 
     _ensure_default_settings()
 
@@ -1161,6 +1135,17 @@ def sheets_get_values(sheet_name: str, range_a1: str) -> list[list[str]]:
     return response.json().get("values", [])
 
 
+def sheets_get_unformatted_values(sheet_name: str, range_a1: str) -> list[list[Any]]:
+    """Reads source values so dates do not lose their year in a short display format."""
+    encoded_range = requests.utils.quote(f"{sheet_name}!{range_a1}", safe="")
+    response = _authorized_session().get(
+        f"{SHEETS_API_BASE}/{_spreadsheet_id()}/values/{encoded_range}",
+        params={"valueRenderOption": "UNFORMATTED_VALUE"},
+    )
+    response.raise_for_status()
+    return response.json().get("values", [])
+
+
 def sheets_update_values(sheet_name: str, range_a1: str, values: list[list[Any]]) -> None:
     encoded_range = requests.utils.quote(f"{sheet_name}!{range_a1}", safe="")
     response = _authorized_session().put(
@@ -1172,19 +1157,45 @@ def sheets_update_values(sheet_name: str, range_a1: str, values: list[list[Any]]
 
 
 def sheets_update_value_by_header(sheet_name: str, row_number: int, header: str, value: Any) -> None:
-    headers = sheets_get_values(sheet_name, "A11:Z11")
+    headers = sheets_get_values(sheet_name, "11:11")
     if not headers or header not in headers[0]:
         raise ConfigError(f"Не найден столбец {header} на листе {sheet_name}.")
     column_index = headers[0].index(header) + 1
-    column = ""
-    while column_index:
-        column_index, remainder = divmod(column_index - 1, 26)
-        column = chr(65 + remainder) + column
+    column = _column_letter(column_index)
     sheets_update_values(sheet_name, f"{column}{row_number}:{column}{row_number}", [[value]])
 
 
 def sheets_append_values(sheet_name: str, values: list[list[Any]]) -> None:
-    encoded_range = requests.utils.quote(f"{sheet_name}!A:Z", safe="")
+    canonical_headers = SHEET_SCHEMAS[sheet_name]
+    sheets_append_objects(sheet_name, [dict(zip(canonical_headers, row)) for row in values])
+
+
+def _column_letter(column_index: int) -> str:
+    column = ""
+    while column_index:
+        column_index, remainder = divmod(column_index - 1, 26)
+        column = chr(65 + remainder) + column
+    return column
+
+
+def sheets_read_table_values(sheet_name: str, end_row: int = 2000) -> list[list[str]]:
+    header_rows = sheets_get_values(sheet_name, "11:11")
+    if not header_rows or not header_rows[0]:
+        return []
+    last_column = _column_letter(len(header_rows[0]))
+    return sheets_get_values(sheet_name, f"A11:{last_column}{end_row}")
+
+
+def sheets_append_objects(sheet_name: str, items: list[dict[str, Any]]) -> None:
+    header_rows = sheets_get_values(sheet_name, "11:11")
+    if not header_rows or not header_rows[0]:
+        raise ConfigError(f"Не найдены заголовки листа {sheet_name} в строке 11.")
+    headers = [str(header).strip() for header in header_rows[0]]
+    missing = {key for item in items for key in item if key not in headers and item[key] != ""}
+    if missing:
+        raise ConfigError(f"На листе {sheet_name} отсутствуют поля: {', '.join(sorted(missing))}")
+    values = [[item.get(header, "") for header in headers] for item in items]
+    encoded_range = requests.utils.quote(f"{sheet_name}!A11:{_column_letter(len(headers))}", safe="")
     response = _authorized_session().post(
         f"{SHEETS_API_BASE}/{_spreadsheet_id()}/values/{encoded_range}:append",
         params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
@@ -1462,7 +1473,7 @@ def _split_command(text: str) -> tuple[str, str]:
 
 
 def _rows_as_dicts(sheet_name: str) -> list[dict[str, str]]:
-    values = sheets_get_values(sheet_name, "A11:Z500")
+    values = sheets_read_table_values(sheet_name)
     if len(values) < 2:
         return []
     headers = values[0]
@@ -1470,7 +1481,7 @@ def _rows_as_dicts(sheet_name: str) -> list[dict[str, str]]:
     for row in values[1:]:
         padded = row + [""] * (len(headers) - len(row))
         if any(str(cell).strip() for cell in padded):
-            rows.append({headers[index]: str(padded[index]).strip() for index in range(len(headers))})
+            rows.append({headers[index]: str(padded[index]).strip() for index in range(len(headers)) if headers[index]})
     return rows
 
 
@@ -1497,24 +1508,17 @@ def _spreadsheet_url() -> str:
 
 
 def _incoming_sheet_url() -> str:
-    return f"{_spreadsheet_url()}#gid={_sheet_id_by_title('Входящие')}"
-
-
-def _sheet_id_by_title(title: str) -> int:
-    metadata = sheets_get_metadata()
-    for sheet in metadata.get("sheets", []):
-        properties = sheet.get("properties") or {}
-        if properties.get("title") == title:
-            return int(properties["sheetId"])
-    raise ConfigError(f"Не найден лист {title}.")
+    return f"{_spreadsheet_url()}#gid=168051248"
 
 
 def _set_setting(key: str, value: str) -> None:
-    values = sheets_get_values("Настройки", "A11:D500")
+    rows = _sheet_rows_with_numbers("Настройки", "A11:D2000")
     now = _now().isoformat(timespec="seconds")
-    for index, row in enumerate(values[1:], start=12):
-        if row and row[0] == key:
-            sheets_update_values("Настройки", f"B{index}:D{index}", [[value, _setting_description(key), now]])
+    for row in rows:
+        if row.get("Ключ") == key:
+            index = int(row["__row_number"])
+            for header, cell_value in {"Значение": value, "Описание": _setting_description(key), "Обновлено": now}.items():
+                sheets_update_value_by_header("Настройки", index, header, cell_value)
             return
     sheets_append_values("Настройки", [[key, value, _setting_description(key), now]])
 
