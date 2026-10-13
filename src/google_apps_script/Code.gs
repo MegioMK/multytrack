@@ -1981,15 +1981,20 @@ function buildPlanColumnFormulas_(planSheet, subtasksSheet, shoppingSheet, tasks
       ['Завтра', 'sub_dates=TODAY()+1'], ['Послезавтра', 'sub_dates=TODAY()+2']];
     var blocks = [];
     sections.forEach(function(section) {
+      var sectionLabel = 'IF(REGEXMATCH(sub_source;"^routine_");"' + section[0] + ' · 🌿 Рутины";' +
+        '"' + section[0] + ' · 📁 "&IF(sub_project<>"";sub_project;"Без проекта"))';
       blocks.push(header === 'Раздел' ? '"' + section[0] + '"' : '""');
-      blocks.push('IFERROR(CHOOSECOLS(SORT(FILTER({sub_dates\\sub_ids\\' + fields[header][0] + '};' +
+      blocks.push('IFERROR(CHOOSECOLS(SORT(FILTER({sub_dates\\IF(REGEXMATCH(sub_source;"^routine_");0;1)\\' +
+        'IF(sub_project<>"";sub_project;"Без проекта")\\sub_ids\\' +
+        (header === 'Раздел' ? sectionLabel : fields[header][0]) + '};' +
         'sub_ids<>"";sub_dates<>"";sub_status<>"idea";sub_status<>"done";sub_status<>"cancelled";sub_status<>"skipped";' +
-        section[1] + ');1;TRUE;2;TRUE);3);"")');
+        section[1] + ');1;TRUE;2;TRUE;3;TRUE;4;TRUE);5);"")');
     });
     blocks.push(header === 'Раздел' ? '"🛒 Покупки"' : '""');
     blocks.push('IFERROR(FILTER(' + fields[header][1] + ';shop_ids<>"";shop_status="new");"")');
     formulas[header] = '=ARRAYFORMULA(LET(sub_ids;' + sub('ID') + ';sub_dates;' + sub('Дата') +
-      ';sub_status;' + sub('Статус') + ';shop_ids;' + shop('ID') + ';shop_status;' + shop('Статус') +
+      ';sub_status;' + sub('Статус') + ';sub_source;' + sub('Источник ID') + ';sub_project;' + sub('Проект / область') +
+      ';shop_ids;' + shop('ID') + ';shop_status;' + shop('Статус') +
       ';VSTACK(' + blocks.join(';') + ')))';
   });
   var ids = sheetColumnRange_(planSheet, 'ID подзадачи');

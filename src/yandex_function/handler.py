@@ -502,7 +502,7 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "")
         if mode == "hot" and due < today:
             selected.append(item)
 
-    selected.sort(key=lambda item: (item.get("Дата", ""), item.get("Название", "")))
+    selected.sort(key=_actionable_subtask_sort_key)
     if mode == "today":
         heading = f"<b>Сегодня, {today.strftime('%d.%m')}</b>"
         empty = "На сегодня открытых подзадач нет."
@@ -524,10 +524,15 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "")
         lines.append(notice)
     lines.append(f"Подзадачи {start + 1}-{start + len(visible)} из {len(selected)}")
     keyboard = []
+    previous_group = ""
     for number, item in enumerate(visible, start=start + 1):
         title = item.get("Название") or "(без названия)"
         is_routine = str(item.get("Источник ID", "")).startswith("routine_")
         is_event = str(item.get("Источник ID", "")).startswith("event_")
+        group = _actionable_subtask_group(item)
+        if group != previous_group:
+            lines.append("\n<b>" + escape(group) + "</b>")
+            previous_group = group
         prefix = "🌿 " if is_routine else ("🗓️ " if is_event else "• ")
         lines.append(f"{number}. {prefix}{escape(title)}")
         actions = [{"text": f"✅ {number}. Готово", "callback_data": _subtask_callback_data("done", mode, page, item)}]
@@ -545,6 +550,20 @@ def build_actionable_subtasks_digest(mode: str, page: int = 0, notice: str = "")
     if navigation:
         keyboard.append(navigation)
     return {"text": "\n".join(lines), "reply_markup": {"inline_keyboard": keyboard}}
+
+
+def _actionable_subtask_sort_key(item: dict[str, str]) -> tuple[str, int, str, str]:
+    """Keeps Telegram aligned with the project grouping in the day plan."""
+    is_routine = str(item.get("Источник ID") or "").startswith("routine_")
+    project = str(item.get("Проект / область") or "").strip() or "Без проекта"
+    return (str(item.get("Дата") or ""), 0 if is_routine else 1, project.casefold(), str(item.get("Название") or "").casefold())
+
+
+def _actionable_subtask_group(item: dict[str, str]) -> str:
+    if str(item.get("Источник ID") or "").startswith("routine_"):
+        return "🌿 Рутины"
+    project = str(item.get("Проект / область") or "").strip() or "Без проекта"
+    return "📁 " + project
 
 
 def build_actionable_shopping_digest(page: int = 0, notice: str = "") -> dict[str, Any]:
